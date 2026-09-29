@@ -136,9 +136,10 @@ rmdir "$MNT_DIR" 2>/dev/null || true
 dd if="$MBR_TMP" of="$LOOP_DEV" bs=440 count=1 conv=notrunc status=none
 rm -f "$MBR_TMP"
 
-# Remove journal (ext4 still mounts fine, just no journal recovery).
-# Then fsck and zero free blocks for zstd compression.
+# Remove journal and reserved blocks (build-once appliance, no need for
+# root reserve or crash recovery). Then fsck and zero free blocks.
 tune2fs -O ^has_journal "$PART_DEV" >/dev/null 2>&1 || true
+tune2fs -m 0 "$PART_DEV" >/dev/null 2>&1 || true
 e2fsck -fy "$PART_DEV" >/dev/null 2>&1 || true
 zerofree "$PART_DEV" >/dev/null 2>&1 || true
 
