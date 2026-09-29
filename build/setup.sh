@@ -8,22 +8,17 @@ APP_URL="${APP_URL:-}"
 echo "==> system config: hostname / network"
 setup-hostname vps-app
 
-# DHCP on eth0 (virtio-net names eth0 on Alpine default naming)
+# DHCP on eth0, force Chinese DNS after DHCP completes (chattr +i on
+# resolv.conf breaks dhcpcd from bringing up the interface).
 cat > /etc/network/interfaces <<'EOF'
 auto lo
 iface lo inet loopback
 
 auto eth0
 iface eth0 inet dhcp
+    post-up echo -e "nameserver 119.29.29.29\nnameserver 223.5.5.5" > /etc/resolv.conf
 EOF
 rc-update add networking boot
-
-# Force IPv4 DNS (VPS has no IPv6 route; DHCP may hand out IPv6 resolvers).
-cat > /etc/resolv.conf <<'EOF'
-nameserver 119.29.29.29
-nameserver 223.5.5.5
-EOF
-chattr +i /etc/resolv.conf 2>/dev/null || true
 
 # --- single-app appliance: disable unused services/processes -------------
 # Drop crond (no scheduled jobs), syslog/klogd (app writes its own log +
