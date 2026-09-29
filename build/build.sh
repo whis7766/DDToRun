@@ -138,6 +138,8 @@ rm -f "$MBR_TMP"
 
 # Zero free blocks so zstd can compress the sparse image tightly (otherwise
 # deleted apk cache / build artifacts leave garbage that defeats compression).
+# First fsck to recover/replay the journal so old metadata isn't left in it.
+e2fsck -fy "$PART_DEV" >/dev/null 2>&1 || true
 zerofree "$PART_DEV" >/dev/null 2>&1 || true
 
 file "$IMG"
