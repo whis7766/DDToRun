@@ -49,23 +49,34 @@ func newClient() *http.Client {
 	dialer := &net.Dialer{
 		Timeout:   15 * time.Second,
 		KeepAlive: 30 * time.Second,
+		Control: func(network, address string, c syscall.RawConn) error {
+			// TCP_NODELAY + explicit socket buffers (kernel autotune may be
+			// conservative on a fresh Alpine with no sysctl tuning).
+			return c.Control(func(fd uintptr) {
+				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4<<20)
+				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, 4<<20)
+			})
+		},
 	}
 	transport := &http.Transport{
-		// Let the server negotiate h2 or http/1.1 (Cloudflare supports h2;
-		// for a single file the difference is small, but h2 over a flaky
-		// connection has better flow control and keeps the connection warm).
 		MaxIdleConns:          numWorkers,
 		MaxConnsPerHost:       numWorkers,
 		IdleConnTimeout:       30 * time.Second,
 		DialContext:           dialer.DialContext,
-		ReadBufferSize:        4 << 20, // 4MB socket buffers for high-BDP paths
+		ReadBufferSize:        4 << 20,
 		WriteBufferSize:       4 << 20,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		TLSHandshakeTimeout:    10 * time.Second,
+		DisableCompression:    true, // binary, no gzip
+		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
+		// TLSNextProto left nil -> Go auto-negotiates h2 when the server
+		// supports it (ALPN "h2"), falls back to http/1.1 otherwise.
 	}
+	// No client.Timeout: never abort an in-progress download as a whole.
+	// Only the stall watchdog (30s without data) triggers a retry.
 	return &http.Client{Transport: transport}
 }
 
@@ -76,11 +87,10 @@ func fetch() bool {
 		return false
 	}
 	os.Remove(tmpPath)
-	client := newClient()
 
 	for attempt := 1; attempt <= maxRetry; attempt++ {
 		log.Printf("fetch attempt %d/%d: %s", attempt, maxRetry, url)
-		if err := downloadOnce(client, url); err != nil {
+		if err := downloadOnce(url); err != nil {
 			log.Printf("download failed: %v", err)
 			banner(fmt.Sprintf("更新下载失败 (尝试 %d/%d): %v", attempt, maxRetry, err))
 			time.Sleep(3 * time.Second)
@@ -105,12 +115,14 @@ func fetch() bool {
 	return false
 }
 
-func downloadOnce(client *http.Client, url string) error {
+func downloadOnce(url string) error {
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+
+	client := newClient()
 
 	// Probe: ask for the first byte to check Range support + total size.
 	req, _ := http.NewRequest("GET", url, nil)
