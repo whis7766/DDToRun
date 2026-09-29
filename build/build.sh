@@ -136,11 +136,11 @@ rmdir "$MNT_DIR" 2>/dev/null || true
 dd if="$MBR_TMP" of="$LOOP_DEV" bs=440 count=1 conv=notrunc status=none
 rm -f "$MBR_TMP"
 
-# Zero free blocks so zstd can compress the sparse image tightly (otherwise
-# deleted apk cache / build artifacts leave garbage that defeats compression).
-# Remove journal (saves a few MB; no need for crash recovery on a build-once
-# image), then fsck to clean up, then zerofree.
-tune2fs -O ^has_journal "$PART_DEV" >/dev/null 2>&1 || true
+# Convert ext4 to minimal ext2-style: strip journal, extents, flex_bg,
+# huge_file, uninit_bg; zero reserved blocks. Lower metadata overhead and
+# avoids extent fragmentation that hurts zstd on the raw image.
+tune2fs -O ^has_journal,^extents,^flex_bg,^huge_file,^uninit_bg "$PART_DEV" >/dev/null 2>&1 || true
+tune2fs -m 0 "$PART_DEV" >/dev/null 2>&1 || true
 e2fsck -fy "$PART_DEV" >/dev/null 2>&1 || true
 zerofree "$PART_DEV" >/dev/null 2>&1 || true
 
