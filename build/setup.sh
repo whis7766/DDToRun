@@ -18,6 +18,13 @@ iface eth0 inet dhcp
 EOF
 rc-update add networking boot
 
+# Force IPv4 DNS (VPS has no IPv6 route; DHCP may hand out IPv6 resolvers).
+cat > /etc/resolv.conf <<'EOF'
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+chattr +i /etc/resolv.conf 2>/dev/null || true
+
 # --- single-app appliance: disable unused services/processes -------------
 # Drop crond (no scheduled jobs), syslog/klogd (app writes its own log +
 # VGA), swap (no swap partition), hwclock (virtual RTC not needed). Keep

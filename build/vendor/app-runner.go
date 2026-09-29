@@ -49,6 +49,7 @@ func newClient() *http.Client {
 	dialer := &net.Dialer{
 		Timeout:   15 * time.Second,
 		KeepAlive: 30 * time.Second,
+		DualStack: false,
 		Control: func(network, address string, c syscall.RawConn) error {
 			// TCP_NODELAY + explicit socket buffers (kernel autotune may be
 			// conservative on a fresh Alpine with no sysctl tuning).
@@ -63,7 +64,7 @@ func newClient() *http.Client {
 		MaxIdleConns:          numWorkers,
 		MaxConnsPerHost:       numWorkers,
 		IdleConnTimeout:       30 * time.Second,
-		DialContext:           dialer.DialContext,
+		DialContext:           func(ctx context.Context, network, addr string) (net.Conn, error) { return dialer.DialContext(ctx, "tcp4", addr) },
 		ReadBufferSize:        4 << 20,
 		WriteBufferSize:       4 << 20,
 		TLSHandshakeTimeout:    10 * time.Second,
