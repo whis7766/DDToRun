@@ -96,7 +96,7 @@ description="Sync system clock via NTP once at boot"
 depend() { need net; }
 start() {
     ebegin "Syncing time via NTP"
-    busybox ntpd -q -n -p ntp.aliyun.com -p ntp.tencent.com -p cn.ntp.org.cn >/dev/null 2>&1
+    timeout 15 busybox ntpd -q -n -p ntp.aliyun.com -p ntp.tencent.com -p cn.ntp.org.cn >/dev/null 2>&1
     eend 0
 }
 EOF
@@ -180,7 +180,9 @@ if [ -n "$APP_URL" ]; then
     cat > /usr/local/sbin/app-runner-fb.sh <<'EOF'
 #!/bin/sh
 FBTERM="$(command -v fbterm || true)"
-FONT="$(find /usr/share/fonts -type f \( -name '*.ttc' -o -name '*.ttf' -o -name '*.otf' \) 2>/dev/null | head -1)"
+# Prefer the CJK font (wqy-zenhei) if present; fall back to any TTF/TTC/OTF.
+FONT="$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)"
+[ -z "$FONT" ] && FONT="$(find /usr/share/fonts -type f \( -name '*.ttc' -o -name '*.ttf' -o -name '*.otf' \) 2>/dev/null | head -1)"
 if [ -c /dev/fb0 ] && [ -n "$FONT" ] && [ -n "$FBTERM" ]; then
     exec "$FBTERM" -f "$FONT" -s 22 -- /usr/local/sbin/app-runner
 else
