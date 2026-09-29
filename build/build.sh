@@ -2,7 +2,7 @@
 # Build a "dd-ready" Alpine Linux VPS image with the OFFICIAL
 # alpine-make-vm-image tool (https://github.com/alpinelinux/alpine-make-vm-image).
 #
-# Layout: legacy BIOS / MBR partition table (one bootable ext4 partition,
+# Layout: legacy BIOS / MBR partition table (one bootable ext2 partition,
 # extlinux bootloader, syslinux mbr.bin in sector 0) — the most compatible
 # layout for VPS reinstall scripts and legacy-BIOS providers.
 #
@@ -117,6 +117,7 @@ APP_URL="$APP_URL" APK="$APK" \
   --mirror-uri "$ALPINE_MIRROR" \
   --kernel-flavor "$KERNEL_FLAVOR" \
   --packages "$PACKAGES" \
+  --rootfs ext2 \
   --script-chroot \
   "$PART_DEV" \
   "$SCRIPT_DIR/setup.sh"
@@ -136,11 +137,7 @@ rmdir "$MNT_DIR" 2>/dev/null || true
 dd if="$MBR_TMP" of="$LOOP_DEV" bs=440 count=1 conv=notrunc status=none
 rm -f "$MBR_TMP"
 
-# Convert ext4 to minimal ext2-style: strip journal, extents, flex_bg,
-# huge_file, uninit_bg; zero reserved blocks. Lower metadata overhead and
-# avoids extent fragmentation that hurts zstd on the raw image.
-tune2fs -O ^has_journal,^extents,^flex_bg,^huge_file,^uninit_bg "$PART_DEV" >/dev/null 2>&1 || true
-tune2fs -m 0 "$PART_DEV" >/dev/null 2>&1 || true
+# ext2 has no journal; just fsck and zero free blocks for zstd.
 e2fsck -fy "$PART_DEV" >/dev/null 2>&1 || true
 zerofree "$PART_DEV" >/dev/null 2>&1 || true
 
