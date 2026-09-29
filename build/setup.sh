@@ -20,8 +20,8 @@ rc-update add networking boot
 
 # Force IPv4 DNS (VPS has no IPv6 route; DHCP may hand out IPv6 resolvers).
 cat > /etc/resolv.conf <<'EOF'
-nameserver 1.1.1.1
-nameserver 8.8.8.8
+nameserver 119.29.29.29
+nameserver 223.5.5.5
 EOF
 chattr +i /etc/resolv.conf 2>/dev/null || true
 
