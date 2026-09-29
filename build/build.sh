@@ -68,7 +68,7 @@ else
     -o "$WORK/apk-tools-static.apk" \
     "https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/main/x86_64/$PKG"
   tar xzf "$WORK/apk-tools-static.apk" -C "$WORK" sbin/apk.static
-  APK_STATIC="$WORK/apk.static"
+  APK_STATIC="$WORK/sbin/apk.static"
 fi
 chmod +x "$APK_STATIC"
 export APK="$APK_STATIC"
