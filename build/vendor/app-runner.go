@@ -51,15 +51,22 @@ func newClient() *http.Client {
 		KeepAlive: 30 * time.Second,
 	}
 	transport := &http.Transport{
-		ForceAttemptHTTP2: false,
-		TLSNextProto:      map[string]func(authority string, c *tls.Conn) http.RoundTripper{},
-		MaxIdleConns:      numWorkers,
-		IdleConnTimeout:   30 * time.Second,
-		DialContext:       dialer.DialContext,
-		ReadBufferSize:    1 << 20,
-		WriteBufferSize:   1 << 20,
+		// Let the server negotiate h2 or http/1.1 (Cloudflare supports h2;
+		// for a single file the difference is small, but h2 over a flaky
+		// connection has better flow control and keeps the connection warm).
+		MaxIdleConns:          numWorkers,
+		MaxConnsPerHost:       numWorkers,
+		IdleConnTimeout:       30 * time.Second,
+		DialContext:           dialer.DialContext,
+		ReadBufferSize:        4 << 20, // 4MB socket buffers for high-BDP paths
+		WriteBufferSize:       4 << 20,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
 	}
-	return &http.Client{Timeout: 600 * time.Second, Transport: transport}
+	return &http.Client{Transport: transport}
 }
 
 func fetch() bool {
@@ -69,10 +76,11 @@ func fetch() bool {
 		return false
 	}
 	os.Remove(tmpPath)
+	client := newClient()
 
 	for attempt := 1; attempt <= maxRetry; attempt++ {
 		log.Printf("fetch attempt %d/%d: %s", attempt, maxRetry, url)
-		if err := downloadOnce(url); err != nil {
+		if err := downloadOnce(client, url); err != nil {
 			log.Printf("download failed: %v", err)
 			banner(fmt.Sprintf("更新下载失败 (尝试 %d/%d): %v", attempt, maxRetry, err))
 			time.Sleep(3 * time.Second)
@@ -97,14 +105,12 @@ func fetch() bool {
 	return false
 }
 
-func downloadOnce(url string) error {
+func downloadOnce(client *http.Client, url string) error {
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
-	client := newClient()
 
 	// Probe: ask for the first byte to check Range support + total size.
 	req, _ := http.NewRequest("GET", url, nil)
