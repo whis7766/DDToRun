@@ -119,8 +119,11 @@ if [ -n "$APP_URL" ]; then
         echo "==> compiling fbterm from source (Alpine native, CJK support)"
         apk add --no-cache build-base fontconfig-dev freetype-dev linux-headers ncurses >/dev/null 2>&1 || true
         cd /tmp
+        rm -rf /tmp/fbterm-*
         tar xzf /mnt/vendor/fbterm-src.tar.gz 2>/dev/null
-        if ( cd fbterm-master \
+        FBTERM_DIR="$(find /tmp -maxdepth 1 -type d -name 'fbterm-*' | head -1)"
+        [ -n "$FBTERM_DIR" ] || { echo "fbterm source did not extract to a fbterm-* directory"; exit 1; }
+        if ( cd "$FBTERM_DIR" \
              && ./configure --prefix=/usr >/tmp/fbterm-build.log 2>&1 \
              && make -j"$(nproc)" >>/tmp/fbterm-build.log 2>&1 \
              && make install >>/tmp/fbterm-build.log 2>&1 ); then
@@ -129,7 +132,7 @@ if [ -n "$APP_URL" ]; then
             echo "fbterm build FAILED - see /tmp/fbterm-build.log"
             tail -15 /tmp/fbterm-build.log; exit 1
         fi
-        cd / && rm -rf /tmp/fbterm-master
+        cd / && rm -rf /tmp/fbterm-*
         # Remove ONLY build-time packages (compiler + headers + -dev). The
         # runtime shared libraries fbterm links against (fontconfig, freetype,
         # libstdc++) are separate packages and must stay. ncurses is kept too:

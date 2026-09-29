@@ -45,19 +45,24 @@ jobs:
           cache: false
 
       - name: Build app-runner
-        env: 
+        env:
           GOEXPERIMENT: "simd,jsonv2,newinliner,runtimefreegc,greenteagc,sizespecializedmalloc,mapsplitgroup"
         run: |
           cd build/vendor
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 goamd64=v3 go build -trimpath \
             -ldflags "-s -w" -o app-runner app-runner.go
 
+      - name: Install host build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zerofree zstd
+
       - name: Build image
         env:
           APP_URL: "${{ github.event.inputs.app_url }}"
-          IMAGE_SIZE_GB: "${{ github.event.inputs.image_size_gb || '0.5' }}"
-          ALPINE_BRANCH: "${{ github.event.inputs.alpine_branch || 'edge' }}"
-          CGO_COMPAT: "${{ github.event.inputs.cgo_compat || 'false' }}"
+          IMAGE_SIZE_GB: "${{ github.event.inputs.image_size_gb }}"
+          ALPINE_BRANCH: "${{ github.event.inputs.alpine_branch }}"
+          CGO_COMPAT: "${{ github.event.inputs.cgo_compat }}"
         run: |
           sudo -E bash build/build.sh
 
@@ -91,7 +96,7 @@ jobs:
           name: ${{ steps.resolve_tag.outputs.tag }}
           generate_release_notes: true
           files: |
-            vpsapp
+            dist/vpsapp
 
       - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v2

@@ -7,8 +7,8 @@
 # layout for VPS reinstall scripts and legacy-BIOS providers.
 #
 # On first boot the root fs auto-grows to the whole disk; if APP_URL is set an
-# app-runner service downloads (aria2c multi-thread) and runs the business
-# binary on the VGA console (tty1) with Chinese (fbterm + wqy-zenhei).
+# app-runner service (static Go binary) downloads and runs the business binary
+# on the VGA console (tty1) with Chinese (fbterm + wqy-zenhei).
 #
 # Env (all optional):
 #   APP_URL        business binary URL (blank = no app-runner installed)
@@ -40,12 +40,12 @@ IMG="$WORK/vps-app-runner.raw"
 TOOL="$WORK/alpine-make-vm-image"
 
 # --- 0. host deps --------------------------------------------------------
-for c in losetup rsync sfdisk mkfs.ext4 curl tar; do
+for c in losetup rsync sfdisk mkfs.ext4 curl tar zerofree; do
   command -v "$c" >/dev/null 2>&1 || { echo "missing host dep: $c"; exit 1; }
 done
 
 # --- 1. fetch official tool ----------------------------------------------
-echo "==> [1/5] fetch official alpine-make-vm-image"
+echo "==> [1/6] fetch official alpine-make-vm-image"
 curl -fSL --retry 5 --retry-all-errors --connect-timeout 30 -o "$TOOL" \
   https://raw.githubusercontent.com/alpinelinux/alpine-make-vm-image/master/alpine-make-vm-image
 chmod +x "$TOOL"
@@ -54,7 +54,7 @@ chmod +x "$TOOL"
 # The official tool downloads apk-tools from gitlab.alpinelinux.org, which is
 # flaky/unreachable from GitHub runners (dl-cdn is fine). We vendor a static
 # apk-tools in build/vendor/ so the build never depends on that download.
-echo "==> [2/5] provision apk.static"
+echo "==> [2/6] provision apk.static"
 APK_STATIC=""
 VENDOR_APK="$SCRIPT_DIR/vendor/apk.static"
 if [ -x "$VENDOR_APK" ]; then
@@ -73,8 +73,22 @@ fi
 chmod +x "$APK_STATIC"
 export APK="$APK_STATIC"
 
-# --- 3. create raw image + MBR partition table ----------------------------
-echo "==> [3/5] create ${IMG} (${IMAGE_SIZE_GB}G), MBR partition, attach loop"
+# --- 3. provision fbterm source (for CJK on the VGA console) -------------
+# Alpine ships no fbterm package; setup.sh compiles it natively in the chroot.
+# We fetch the upstream 1.7 release tarball here (not committed; gitignored) so
+# the chroot step can find it at /mnt/vendor/fbterm-src.tar.gz.
+echo "==> [3/6] provision fbterm source"
+VENDOR_FBTERM="$SCRIPT_DIR/vendor/fbterm-src.tar.gz"
+if [ -s "$VENDOR_FBTERM" ]; then
+  echo "  using cached $VENDOR_FBTERM"
+else
+  curl -fSL --retry 5 --retry-all-errors --connect-timeout 30 \
+    -o "$VENDOR_FBTERM" \
+    https://deb.debian.org/debian/pool/main/f/fbterm/fbterm_1.7.orig.tar.gz
+fi
+
+# --- 4. create raw image + MBR partition table ----------------------------
+echo "==> [4/6] create ${IMG} (${IMAGE_SIZE_GB}G), MBR partition, attach loop"
 truncate -s "$(awk "BEGIN{printf \"%dM\", ${IMAGE_SIZE_GB}*1024}")" "$IMG"
 LOOP_DEV=""
 for try in 1 2 3; do
@@ -93,8 +107,8 @@ PART_DEV="${LOOP_DEV}p1"
 cleanup_loop() { partx -d "$LOOP_DEV" 2>/dev/null || true; losetup -d "$LOOP_DEV" 2>/dev/null || true; }
 trap cleanup_loop EXIT
 
-# --- 4. build image inside the partition (official tool) ------------------
-echo "==> [4/5] build on $PART_DEV (kernel=${KERNEL_FLAVOR}, branch=${ALPINE_BRANCH})"
+# --- 5. build image inside the partition (official tool) ------------------
+echo "==> [5/6] build on $PART_DEV (kernel=${KERNEL_FLAVOR}, branch=${ALPINE_BRANCH})"
 # NOTE: --script-chroot is a boolean flag; the setup script is a positional
 # arg: alpine-make-vm-image [options] <image> [<script>]
 APP_URL="$APP_URL" APK="$APK" \
@@ -107,10 +121,10 @@ APP_URL="$APP_URL" APK="$APK" \
   "$PART_DEV" \
   "$SCRIPT_DIR/setup.sh"
 
-# --- 5. install syslinux MBR boot code ------------------------------------
+# --- 6. install syslinux MBR boot code ------------------------------------
 # The official tool installs extlinux into the partition boot record; for an
 # MBR-partitioned disk we also need the standard MBR bootstrap in sector 0.
-echo "==> [5/5] install syslinux MBR boot code"
+echo "==> [6/6] install syslinux MBR boot code"
 MBR_TMP="$(mktemp /tmp/mbr.XXXXXX.bin)"
 MNT_DIR="$(mktemp -d /tmp/mbr-mnt.XXXXXX)"
 if mount "$PART_DEV" "$MNT_DIR" 2>/dev/null; then
@@ -128,9 +142,8 @@ zerofree "$PART_DEV" >/dev/null 2>&1 || true
 
 file "$IMG"
 
-# copy RAW image + checksum to dist/ for immediate smoke testing (no zstd yet:
-# the workflow runs the smoke test on the uncompressed image first, and only
-# compresses + publishes after it passes).
+# copy RAW image + checksum to dist/; the workflow then zstd-compresses and
+# publishes it as the release asset.
 OUT_DIR="$(dirname "$SCRIPT_DIR")/dist"
 mkdir -p "$OUT_DIR"
 RAW_OUT="$OUT_DIR/vps-app-runner.img.raw"

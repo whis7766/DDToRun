@@ -1,10 +1,16 @@
-# Build artifacts
+# Build output (raw image, zstd, checksum)
 dist/
 
-# Go
+# Vendored binaries downloaded at build time (not committed)
 build/vendor/app-runner
+build/vendor/app-runner.exe
 build/vendor/apk.static
 build/vendor/fbterm-src.tar.gz
 
-# OS
+# Editor / OS noise
 .DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
