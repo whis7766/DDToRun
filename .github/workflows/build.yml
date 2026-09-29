@@ -1,0 +1,102 @@
+name: Build Alpine VPS App Runner Image
+on:
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: "Business binary download URL (blank = no app-runner)"
+        required: false
+        type: string
+      release_tag:
+        description: "Release tag"
+        required: true
+        default: "dd"
+        type: string
+      image_size_gb:
+        description: "Image size in GB"
+        required: true
+        default: "1"
+        type: string
+      alpine_branch:
+        description: "Alpine branch"
+        required: false
+        default: "edge"
+        type: string
+      cgo_compat:
+        description: "Install glibc compat layer (gcompat/libc6-compat/libstdc++) for dynamic CGO binaries. Off = pure static Go only, smaller image."
+        required: true
+        default: "false"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build + publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.27.1"
+          cache: false
+
+      - name: Build app-runner
+        env: 
+          GOEXPERIMENT: "simd,jsonv2,newinliner,runtimefreegc,greenteagc,sizespecializedmalloc,mapsplitgroup"
+        run: |
+          cd build/vendor
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 goamd64=v3 go build -trimpath \
+            -ldflags "-s -w" -o app-runner app-runner.go
+
+      - name: Build image
+        env:
+          APP_URL: "${{ github.event.inputs.app_url }}"
+          IMAGE_SIZE_GB: "${{ github.event.inputs.image_size_gb || '0.5' }}"
+          ALPINE_BRANCH: "${{ github.event.inputs.alpine_branch || 'edge' }}"
+          CGO_COMPAT: "${{ github.event.inputs.cgo_compat || 'false' }}"
+        run: |
+          sudo -E bash build/build.sh
+
+      - name: Compress
+        run: |
+          cd "$GITHUB_WORKSPACE/dist"
+          sudo chown -R "$(id -un):$(id -gn)" .
+          RAW="vps-app-runner.img.raw"
+          ZST="vpsapp"
+          zstd -q -22 --ultra --long=27 --single-thread -f "$RAW" -o "$ZST"
+
+      - name: Resolve release tag
+        id: resolve_tag
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          TAG="${INPUT_TAG:-dd}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: ${TAG}"
+      - name: Move release tag to current commit
+        env:
+          TAG: ${{ steps.resolve_tag.outputs.tag }}
+        run: |
+          git tag -f "${TAG}" HEAD
+          git push origin "refs/tags/${TAG}" --force
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve_tag.outputs.tag }}
+          name: ${{ steps.resolve_tag.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            vpsapp
+
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 0

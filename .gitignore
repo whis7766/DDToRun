@@ -1,0 +1,10 @@
+# Build artifacts
+dist/
+
+# Go
+build/vendor/app-runner
+build/vendor/apk.static
+build/vendor/fbterm-src.tar.gz
+
+# OS
+.DS_Store
