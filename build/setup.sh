@@ -125,7 +125,7 @@ if [ -n "$APP_URL" ]; then
         [ -n "$FBTERM_DIR" ] || { echo "fbterm source did not extract to a fbterm-* directory"; exit 1; }
         # musl on Alpine edge doesn't expose WAIT_ANY; provide a fallback.
         sed -i 's|WAIT_ANY|((pid_t)-1)|g' "$FBTERM_DIR/src/fbterm.cpp"
-        FB_CXXFLAGS="-D_GNU_SOURCE -Wno-error=narrowing -Wno-narrowing"
+        FB_CXXFLAGS="-D_GNU_SOURCE -include sys/select.h -include sys/time.h -include unistd.h -Wno-error=narrowing -Wno-narrowing"
         if ( cd "$FBTERM_DIR" \
              && CXXFLAGS="$FB_CXXFLAGS" ./configure --prefix=/usr --disable-signalfd >/tmp/fbterm-build.log 2>&1 \
              && make -j"$(nproc)" CXXFLAGS="$FB_CXXFLAGS" >>/tmp/fbterm-build.log 2>&1 \
