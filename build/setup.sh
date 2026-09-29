@@ -124,7 +124,7 @@ if [ -n "$APP_URL" ]; then
         FBTERM_DIR="$(find /tmp -maxdepth 1 -type d -name 'fbterm-*' | head -1)"
         [ -n "$FBTERM_DIR" ] || { echo "fbterm source did not extract to a fbterm-* directory"; exit 1; }
         if ( cd "$FBTERM_DIR" \
-             && CXXFLAGS="-Wno-error=narrowing -Wno-narrowing" ./configure --prefix=/usr >/tmp/fbterm-build.log 2>&1 \
+             && CXXFLAGS="-Wno-error=narrowing -Wno-narrowing" ./configure --prefix=/usr --disable-signalfd >/tmp/fbterm-build.log 2>&1 \
              && make -j"$(nproc)" CXXFLAGS="-Wno-error=narrowing -Wno-narrowing" >>/tmp/fbterm-build.log 2>&1 \
              && make install >>/tmp/fbterm-build.log 2>&1 ); then
             :
