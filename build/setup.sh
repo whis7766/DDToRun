@@ -136,6 +136,7 @@ if [ -n "$APP_URL" ]; then
             tail -15 /tmp/fbterm-build.log; exit 1
         fi
         cd / && rm -rf /tmp/fbterm-*
+        strip /usr/bin/fbterm 2>/dev/null || true
         # Remove ONLY build-time packages (compiler + headers + -dev). The
         # runtime shared libraries fbterm links against (fontconfig, freetype,
         # libstdc++) are separate packages and must stay. ncurses is kept too:
@@ -200,5 +201,17 @@ fi
 # keep /etc/modules empty so nothing extra is probed at boot.
 : > /etc/modules
 rm -rf /var/cache/apk/* /usr/share/doc /usr/share/man /usr/share/info 2>/dev/null || true
+
+# VPS doesn't need firmware blobs.
+rm -rf /lib/firmware 2>/dev/null || true
+
+# Virtio drivers are built into the kernel; remove .ko modules to save space.
+find /lib/modules -name '*.ko*' -delete 2>/dev/null || true
+
+# Keep only the CJK font; remove other fonts to save space.
+find /usr/share/fonts -type f ! -iname 'wqy*' -delete 2>/dev/null || true
+
+# Remove locale/i18n data.
+rm -rf /usr/share/locale /usr/share/i18n 2>/dev/null || true
 
 echo "==> setup done"
