@@ -138,7 +138,9 @@ rm -f "$MBR_TMP"
 
 # Zero free blocks so zstd can compress the sparse image tightly (otherwise
 # deleted apk cache / build artifacts leave garbage that defeats compression).
-# First fsck to recover/replay the journal so old metadata isn't left in it.
+# Remove journal (saves a few MB; no need for crash recovery on a build-once
+# image), then fsck to clean up, then zerofree.
+tune2fs -O ^has_journal "$PART_DEV" >/dev/null 2>&1 || true
 e2fsck -fy "$PART_DEV" >/dev/null 2>&1 || true
 zerofree "$PART_DEV" >/dev/null 2>&1 || true
 
