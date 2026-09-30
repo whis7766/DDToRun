@@ -69,6 +69,13 @@ jobs:
           sudo sed -i 's|tty1::respawn|ttyS0::respawn|' mnt/etc/inittab
           echo "--- modified inittab ---"
           grep tty mnt/etc/inittab
+          # On serial, skip fbterm (which writes to framebuffer, not serial)
+          sudo bash -c 'cat > mnt/usr/local/sbin/app-runner-fb.sh << "EOS"
+#!/bin/sh
+printf "nameserver 119.29.29.29\nnameserver 223.5.5.5\n" > /etc/resolv.conf 2>/dev/null
+exec /usr/local/sbin/app-runner
+EOS'
+          sudo chmod +x mnt/usr/local/sbin/app-runner-fb.sh
           sudo umount mnt
 
       - name: Boot with KVM
@@ -101,7 +108,7 @@ jobs:
           echo "Waiting for app-runner download..."
           for i in $(seq 1 60); do
             sleep 2
-            if grep -qE "starting|downloaded|running|FAIL|failed|error|尚无可用" boot.log 2>/dev/null; then
+            if grep -qE "app-runner.*starting|fetch attempt|downloaded|尚无可|no app available|尚未有" boot.log 2>/dev/null; then
               echo "app-runner output detected after $((i*2))s"
               break
             fi
