@@ -199,6 +199,8 @@ if [ -n "$APP_URL" ]; then
     # fall back to the plain VGA tty when no framebuffer / font / fbterm.
     cat > /usr/local/sbin/app-runner-fb.sh <<'EOF'
 #!/bin/sh
+# Force IPv4 DNS before Go starts (DHCP may have handed out unreachable IPv6).
+printf 'nameserver 119.29.29.29\nnameserver 223.5.5.5\n' > /etc/resolv.conf 2>/dev/null
 FBTERM="$(command -v fbterm || true)"
 # Prefer the CJK font (wqy-zenhei) if present; fall back to any TTF/TTC/OTF.
 FONT="$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)"

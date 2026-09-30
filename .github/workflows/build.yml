@@ -80,18 +80,27 @@ jobs:
           sudo apt-get install -y qemu-system-x86
           cd "$GITHUB_WORKSPACE/dist"
           zstd -d -f vpsapp -o test.img
-          # Boot in QEMU with serial console to file. TCG emulation (no KVM on
-          # runners). Give it 60s to boot and attempt download.
-          (timeout 70 qemu-system-x86_64 \
+          # Boot in QEMU. TCG is slow; poll up to 120s for app-runner output.
+          qemu-system-x86_64 \
             -m 512 -smp 1 \
             -drive format=raw,file=test.img,if=virtio \
             -netdev user,id=n0 -device virtio-net,netdev=n0 \
             -nographic -serial file:console.log \
-            -display none >/dev/null 2>&1) || true
+            -display none &
+          QPID=$!
+          for i in $(seq 1 60); do
+            sleep 2
+            if grep -q "app-runner" console.log 2>/dev/null; then
+              echo "app-runner detected after $((i*2))s"
+              break
+            fi
+          done
+          sleep 5
+          kill $QPID 2>/dev/null || true
+          wait $QPID 2>/dev/null || true
           echo "=== console log ==="
           cat console.log
           echo "=== end log ==="
-          # Fail on known boot/network failures.
           if grep -q "Kernel panic" console.log; then
             echo "FAIL: kernel panic"; exit 1
           fi
@@ -107,7 +116,7 @@ jobs:
           if grep -q "app-runner" console.log; then
             echo "PASS: app-runner started"
           else
-            echo "WARN: app-runner not seen in log"
+            echo "FAIL: app-runner never started"; exit 1
           fi
 
       - name: Resolve release tag
