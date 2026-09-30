@@ -54,8 +54,12 @@ jobs:
 
       - name: Add serial console to syslinux
         run: |
+          sudo chown -R runner:runner dist
           cd dist
-          zstd -d -f vpsapp -o test.img
+          ls -la
+          RAW=$(ls *.raw *.img 2>/dev/null | head -1)
+          echo "Found raw image: $RAW"
+          cp "$RAW" test.img
           # Mount partition 1 (offset 2048*512=1048576) and add console=ttyS0 to syslinux cfg
           mkdir -p mnt
           sudo mount -o loop,offset=1048576 test.img mnt
