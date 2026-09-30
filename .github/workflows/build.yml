@@ -75,6 +75,41 @@ jobs:
           ZST="vpsapp"
           zstd -q -22 --ultra --long=27 --single-thread -f "$RAW" -o "$ZST"
 
+      - name: QEMU boot test
+        run: |
+          sudo apt-get install -y qemu-system-x86
+          cd "$GITHUB_WORKSPACE/dist"
+          zstd -d -f vpsapp -o test.img
+          # Boot in QEMU with serial console to file. TCG emulation (no KVM on
+          # runners). Give it 60s to boot and attempt download.
+          (timeout 70 qemu-system-x86_64 \
+            -m 512 -smp 1 \
+            -drive format=raw,file=test.img,if=virtio \
+            -netdev user,id=n0 -device virtio-net,netdev=n0 \
+            -nographic -serial file:console.log \
+            -display none >/dev/null 2>&1) || true
+          echo "=== console log ==="
+          cat console.log
+          echo "=== end log ==="
+          # Fail on known boot/network failures.
+          if grep -q "Kernel panic" console.log; then
+            echo "FAIL: kernel panic"; exit 1
+          fi
+          if grep -q "mounting root: failed" console.log; then
+            echo "FAIL: root mount failed"; exit 1
+          fi
+          if grep -q "emergency recovery shell" console.log; then
+            echo "FAIL: emergency shell"; exit 1
+          fi
+          if grep -q "network is unreachable" console.log; then
+            echo "FAIL: network unreachable"; exit 1
+          fi
+          if grep -q "app-runner" console.log; then
+            echo "PASS: app-runner started"
+          else
+            echo "WARN: app-runner not seen in log"
+          fi
+
       - name: Resolve release tag
         id: resolve_tag
         env:
