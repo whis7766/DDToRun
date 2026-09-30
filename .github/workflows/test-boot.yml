@@ -65,6 +65,10 @@ jobs:
           sudo mount -o loop,offset=1048576 test.img mnt
           sudo sed -i 's|APPEND|APPEND console=ttyS0|' mnt/boot/extlinux.conf
           cat mnt/boot/extlinux.conf
+          # Also run app-runner on serial console so we can see download output
+          sudo sed -i 's|tty1::respawn|ttyS0::respawn|' mnt/etc/inittab
+          echo "--- modified inittab ---"
+          grep tty mnt/etc/inittab
           sudo umount mnt
 
       - name: Boot with KVM
@@ -80,7 +84,7 @@ jobs:
           QPID=$!
           echo "QEMU pid=$QPID"
 
-          # Wait for boot to complete (root mounted, OpenRC started)
+          # Phase 1: wait for boot
           for i in $(seq 1 30); do
             sleep 2
             if grep -q "Starting local" boot.log 2>/dev/null; then
@@ -91,20 +95,26 @@ jobs:
               echo "FAIL: kernel panic"
               kill $QPID; exit 1
             fi
-            if grep -q "mounting root: failed" boot.log 2>/dev/null; then
-              echo "FAIL: root mount failed"
-              kill $QPID; exit 1
+          done
+
+          # Phase 2: wait for app-runner download (up to 120s)
+          echo "Waiting for app-runner download..."
+          for i in $(seq 1 60); do
+            sleep 2
+            if grep -qE "starting|downloaded|running|FAIL|failed|error|尚无可用" boot.log 2>/dev/null; then
+              echo "app-runner output detected after $((i*2))s"
+              break
             fi
           done
 
-          sleep 5
+          sleep 15
           kill $QPID 2>/dev/null || true
           wait $QPID 2>/dev/null || true
 
-          echo "=== boot log (last 50 lines) ==="
-          tail -50 boot.log
+          echo "=== boot log (last 100 lines) ==="
+          tail -100 boot.log
 
-          # Check for fatal errors
+          # Checks
           if grep -q "Kernel panic" boot.log; then
             echo "FAIL: kernel panic"; exit 1
           fi
@@ -114,9 +124,18 @@ jobs:
           if grep -q "emergency recovery shell" boot.log; then
             echo "FAIL: emergency shell"; exit 1
           fi
-          if grep -q "EXT4-fs" boot.log && grep -q "OpenRC" boot.log; then
-            echo "PASS: image boots, root mounted, OpenRC started"
-          else
-            echo "FAIL: boot incomplete"
-            exit 1
+          # Check root auto-grow
+          if ! grep -q "Growing root filesystem" boot.log; then
+            echo "FAIL: root auto-grow not detected"; exit 1
           fi
+          echo "PASS: root auto-grow detected"
+          # Check network DHCP
+          if ! grep -q "lease of" boot.log; then
+            echo "FAIL: no DHCP lease"; exit 1
+          fi
+          echo "PASS: DHCP lease obtained"
+          # Check app-runner started
+          if ! grep -qE "app-runner|fetch|download|starting" boot.log; then
+            echo "FAIL: app-runner never started"; exit 1
+          fi
+          echo "PASS: app-runner started"
