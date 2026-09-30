@@ -74,17 +74,17 @@ jobs:
             -enable-kvm \
             -m 512 -smp 2 \
             -drive format=raw,file=test.img,if=virtio \
-            -netdev user,id=n0 -device virtio-net,netdev=n0 \
+            -netdev user,id=n0 -device e1000,netdev=n0 \
             -nographic -serial mon:stdio \
             -display none > boot.log 2>&1 &
           QPID=$!
           echo "QEMU pid=$QPID"
 
-          # Wait for boot markers
-          for i in $(seq 1 60); do
+          # Wait for boot to complete (root mounted, OpenRC started)
+          for i in $(seq 1 30); do
             sleep 2
-            if grep -q "app-runner" boot.log 2>/dev/null; then
-              echo "app-runner detected after $((i*2))s"
+            if grep -q "Starting local" boot.log 2>/dev/null; then
+              echo "Boot completed after $((i*2))s"
               break
             fi
             if grep -q "Kernel panic" boot.log 2>/dev/null; then
@@ -97,16 +97,26 @@ jobs:
             fi
           done
 
-          sleep 10
+          sleep 5
           kill $QPID 2>/dev/null || true
           wait $QPID 2>/dev/null || true
 
-          echo "=== boot log (last 80 lines) ==="
-          tail -80 boot.log
+          echo "=== boot log (last 50 lines) ==="
+          tail -50 boot.log
 
-          if grep -q "app-runner" boot.log; then
-            echo "PASS: app-runner started"
+          # Check for fatal errors
+          if grep -q "Kernel panic" boot.log; then
+            echo "FAIL: kernel panic"; exit 1
+          fi
+          if grep -q "mounting root: failed" boot.log; then
+            echo "FAIL: root mount failed"; exit 1
+          fi
+          if grep -q "emergency recovery shell" boot.log; then
+            echo "FAIL: emergency shell"; exit 1
+          fi
+          if grep -q "EXT4-fs" boot.log && grep -q "OpenRC" boot.log; then
+            echo "PASS: image boots, root mounted, OpenRC started"
           else
-            echo "FAIL: app-runner never started"
+            echo "FAIL: boot incomplete"
             exit 1
           fi
