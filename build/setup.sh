@@ -23,6 +23,12 @@ net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 EOF
 
+# Static IPv4 DNS (DHCP may hand out IPv6 resolvers we can't reach).
+cat > /etc/resolv.conf <<'EOF'
+nameserver 119.29.29.29
+nameserver 223.5.5.5
+EOF
+
 # --- single-app appliance: disable unused services/processes -------------
 # Drop crond (no scheduled jobs), syslog/klogd (app writes its own log +
 # VGA), swap (no swap partition), hwclock (virtual RTC not needed). Keep
@@ -36,7 +42,7 @@ rc-update del hwclock boot >/dev/null 2>&1 || true
 # not consumed - skip them to shorten boot.
 rc-update del cgroups sysinit >/dev/null 2>&1 || true
 rc-update del hwdrivers sysinit >/dev/null 2>&1 || true
-rc-update del sysctl boot >/dev/null 2>&1 || true
+# Keep sysctl boot: we need it to apply disable_ipv6.
 rc-update del dmesg sysinit >/dev/null 2>&1 || true
 
 # Only tty1 runs the app (kiosk); drop the other gettys.
