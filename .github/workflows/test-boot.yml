@@ -82,7 +82,7 @@ jobs:
             -enable-kvm \
             -m 512 -smp 2 \
             -drive format=raw,file=test.img,if=virtio \
-            -netdev user,id=n0 -device e1000,netdev=n0 \
+            -netdev user,id=n0 -device virtio-net,netdev=n0 \
             -nographic -serial mon:stdio \
             -display none > boot.log 2>&1 &
           QPID=$!
