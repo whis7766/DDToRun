@@ -232,18 +232,18 @@ rm -rf /var/cache/apk/* /usr/share/doc /usr/share/man /usr/share/info 2>/dev/nul
 rm -rf /lib/firmware 2>/dev/null || true
 
 # Keep network driver modules (virtio_net, e1000) and their deps; delete the rest.
-# virtio_blk/virtio_pci are built-in, but virtio_net/e1000 may be modules.
-KEEP_MODS="virtio_net.ko virtio_pci.ko virtio.ko virtio_ring.ko net.ko stp.ko llc.ko e1000.ko mii.ko"
+KEEP_MODS="virtio_net virtio_pci virtio virtio_80211 virtio_ring net af_packet stp llc e1000 mii"
 find /lib/modules -name '*.ko*' | while read m; do
   keep=0
   for k in $KEEP_MODS; do
-    case "$m" in *"$k") keep=1;; esac
+    case "$(basename "$m")" in "$k".ko*) keep=1;; esac
   done
   [ "$keep" = "0" ] && rm -f "$m"
 done
-# Also remove module dependency files that aren't needed, but keep modules.dep
-find /lib/modules -name '*.ko*' | wc -l
-echo "==> kept network modules above"
+# Rebuild module dependency tree.
+depmod -a 2>/dev/null || true
+echo "==> kept network modules:"
+find /lib/modules -name '*.ko*' 2>/dev/null
 
 # Keep only the CJK font; remove other fonts to save space.
 find /usr/share/fonts -type f ! -iname 'wqy*' -delete 2>/dev/null || true
