@@ -8,17 +8,29 @@ APP_URL="${APP_URL:-}"
 echo "==> system config: hostname / network"
 setup-hostname vps-app
 
-# DHCP on eth0, force Chinese DNS after DHCP completes (chattr +i on
-# resolv.conf breaks dhcpcd from bringing up the interface).
 cat > /etc/network/interfaces <<'EOF'
 auto lo
 iface lo inet loopback
 
 auto eth0
 iface eth0 inet dhcp
-    post-up echo -e "nameserver 119.29.29.29\nnameserver 223.5.5.5" > /etc/resolv.conf
 EOF
 rc-update add networking boot
+
+# Static Chinese DNS (overwrite whatever DHCP hands out).
+# udhcpc will rewrite resolv.conf on DHCP, so we also add a local.d script
+# that runs after networking and forces it back.
+cat > /etc/resolv.conf <<'EOF'
+nameserver 119.29.29.29
+nameserver 223.5.5.5
+EOF
+mkdir -p /etc/local.d
+cat > /etc/local.d/00-dns.start <<'SCRIPT'
+#!/bin/sh
+echo -e "nameserver 119.29.29.29\nnameserver 223.5.5.5" > /etc/resolv.conf
+SCRIPT
+chmod +x /etc/local.d/00-dns.start
+rc-update add local default
 
 # --- single-app appliance: disable unused services/processes -------------
 # Drop crond (no scheduled jobs), syslog/klogd (app writes its own log +
