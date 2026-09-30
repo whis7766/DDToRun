@@ -63,8 +63,8 @@ jobs:
           # Mount partition 1 (offset 2048*512=1048576) and add console=ttyS0 to syslinux cfg
           mkdir -p mnt
           sudo mount -o loop,offset=1048576 test.img mnt
-          sudo sed -i 's|APPEND|APPEND console=ttyS0|' mnt/boot/syslinux/syslinux.cfg
-          cat mnt/boot/syslinux/syslinux.cfg
+          sudo sed -i 's|APPEND|APPEND console=ttyS0|' mnt/boot/extlinux.conf
+          cat mnt/boot/extlinux.conf
           sudo umount mnt
 
       - name: Boot with KVM
