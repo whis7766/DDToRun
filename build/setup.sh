@@ -232,7 +232,7 @@ rm -rf /var/cache/apk/* /usr/share/doc /usr/share/man /usr/share/info 2>/dev/nul
 rm -rf /lib/firmware 2>/dev/null || true
 
 # Keep network driver modules (virtio_net, e1000) and their deps; delete the rest.
-KEEP_MODS="virtio_net virtio_pci virtio virtio_80211 virtio_ring net af_packet stp llc e1000 mii"
+KEEP_MODS="virtio_net virtio_pci virtio virtio_ring net af_packet stp llc e1000 mii net_failover"
 find /lib/modules -name '*.ko*' | while read m; do
   keep=0
   for k in $KEEP_MODS; do
