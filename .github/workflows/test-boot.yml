@@ -70,12 +70,9 @@ jobs:
           echo "--- modified inittab ---"
           grep tty mnt/etc/inittab
           # On serial, skip fbterm (which writes to framebuffer, not serial)
-          sudo tee mnt/usr/local/sbin/app-runner-fb.sh > /dev/null << 'SCRIPT'
-#!/bin/sh
-printf "nameserver 119.29.29.29\nnameserver 223.5.5.5\n" > /etc/resolv.conf 2>/dev/null
-exec /usr/local/sbin/app-runner
-SCRIPT
-          sudo chmod +x mnt/usr/local/sbin/app-runner-fb.sh
+          sudo sed -i 's|^exec.*fbterm.*||' mnt/usr/local/sbin/app-runner-fb.sh
+          sudo sed -i 's|^else$|exec /usr/local/sbin/app-runner\n#|' mnt/usr/local/sbin/app-runner-fb.sh
+          cat mnt/usr/local/sbin/app-runner-fb.sh
           sudo umount mnt
 
       - name: Boot with KVM
