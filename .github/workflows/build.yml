@@ -78,10 +78,19 @@ jobs:
       - name: QEMU boot test
         run: |
           set +e
-          sudo apt-get install -y qemu-system-x86
-          # Grant KVM access
-          sudo chmod 666 /dev/kvm 2>/dev/null || echo "no /dev/kvm, using TCG"
+          sudo apt-get install -y qemu-system-x86 cpu-checker
+          # KVM diagnostics
+          echo "=== KVM diagnostics ==="
+          ls -la /dev/kvm 2>/dev/null || echo "no /dev/kvm"
+          sudo kvm-ok 2>&1
+          sudo modprobe kvm 2>/dev/null
+          sudo modprobe kvm_intel 2>/dev/null || sudo modprobe kvm_amd 2>/dev/null
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules 2>/dev/null
+          sudo udevadm trigger --name-match=kvm 2>/dev/null
+          sudo chmod 666 /dev/kvm 2>/dev/null
           ls -la /dev/kvm 2>/dev/null
+          echo "=== end diagnostics ==="
           cd "$GITHUB_WORKSPACE/dist"
           zstd -d -f vpsapp -o test.img
           echo "Starting QEMU..."
