@@ -22,6 +22,8 @@ cat > /etc/sysctl.conf <<'EOF'
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 EOF
+# Don't fail if a key doesn't exist on this kernel.
+echo 'SYSCTL_OPTS="-e"' > /etc/conf.d/sysctl
 
 # Static IPv4 DNS (DHCP may hand out IPv6 resolvers we can't reach).
 # Write it now and again in local.d (runs after networking in default runlevel).
@@ -244,9 +246,16 @@ done
 depmod -a 2>/dev/null || true
 echo "==> kept network modules:"
 find /lib/modules -name '*.ko*' 2>/dev/null
-# Enable BBR for better network performance.
-echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+# Enable BBR for better network performance (set in local.d after modules load).
+cat > /etc/local.d/10-bbr.start <<'EOF'
+#!/bin/sh
+modprobe tcp_bbr 2>/dev/null
+modprobe sch_fq 2>/dev/null
+echo "net.core.default_qdisc=fq" > /etc/sysctl.d/10-bbr.conf
+echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/10-bbr.conf
+sysctl -p /etc/sysctl.d/10-bbr.conf 2>/dev/null
+EOF
+chmod +x /etc/local.d/10-bbr.start
 
 # Keep only the CJK font; remove other fonts to save space.
 find /usr/share/fonts -type f ! -iname 'wqy*' -delete 2>/dev/null || true
