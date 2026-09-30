@@ -77,27 +77,19 @@ jobs:
 
       - name: QEMU boot test
         run: |
+          set +e
           sudo apt-get install -y qemu-system-x86
           cd "$GITHUB_WORKSPACE/dist"
           zstd -d -f vpsapp -o test.img
-          # Use KVM if available, fall back to TCG.
-          KVM_ARG=""
-          [ -e /dev/kvm ] && KVM_ARG="-enable-kvm" && echo "KVM available" || echo "KVM not available, using TCG"
+          echo "Starting QEMU..."
           qemu-system-x86_64 \
-            $KVM_ARG \
             -m 512 -smp 2 \
             -drive format=raw,file=test.img,if=virtio \
             -netdev user,id=n0 -device virtio-net,netdev=n0 \
             -nographic -serial file:console.log \
             -display none >qemu-stderr.log 2>&1 &
           QPID=$!
-          sleep 2
-          if ! kill -0 $QPID 2>/dev/null; then
-            echo "QEMU failed to start:"
-            cat qemu-stderr.log
-            exit 1
-          fi
-          echo "QEMU started pid=$QPID"
+          echo "QEMU pid=$QPID"
           for i in $(seq 1 90); do
             sleep 2
             if grep -q "app-runner" console.log 2>/dev/null; then
@@ -106,24 +98,27 @@ jobs:
             fi
           done
           sleep 5
-          kill $QPID 2>/dev/null || true
-          wait $QPID 2>/dev/null || true
+          kill $QPID 2>/dev/null
+          wait $QPID 2>/dev/null
           echo "=== console log ==="
-          cat console.log
+          cat console.log 2>/dev/null || echo "(no console.log)"
           echo "=== end log ==="
-          if grep -q "Kernel panic" console.log; then
+          echo "=== qemu stderr ==="
+          cat qemu-stderr.log 2>/dev/null
+          echo "=== end stderr ==="
+          if grep -q "Kernel panic" console.log 2>/dev/null; then
             echo "FAIL: kernel panic"; exit 1
           fi
-          if grep -q "mounting root: failed" console.log; then
+          if grep -q "mounting root: failed" console.log 2>/dev/null; then
             echo "FAIL: root mount failed"; exit 1
           fi
-          if grep -q "emergency recovery shell" console.log; then
+          if grep -q "emergency recovery shell" console.log 2>/dev/null; then
             echo "FAIL: emergency shell"; exit 1
           fi
-          if grep -q "network is unreachable" console.log; then
+          if grep -q "network is unreachable" console.log 2>/dev/null; then
             echo "FAIL: network unreachable"; exit 1
           fi
-          if grep -q "app-runner" console.log; then
+          if grep -q "app-runner" console.log 2>/dev/null; then
             echo "PASS: app-runner started"
           else
             echo "FAIL: app-runner never started"; exit 1
