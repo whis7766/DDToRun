@@ -69,9 +69,9 @@ jobs:
           sudo sed -i 's|tty1::respawn|ttyS0::respawn|' mnt/etc/inittab
           echo "--- modified inittab ---"
           grep tty mnt/etc/inittab
-          # On serial, skip fbterm (which writes to framebuffer, not serial)
-          sudo sed -i 's|^exec.*fbterm.*||' mnt/usr/local/sbin/app-runner-fb.sh
-          sudo sed -i 's|^else$|exec /usr/local/sbin/app-runner\n#|' mnt/usr/local/sbin/app-runner-fb.sh
+          # On serial, skip fbterm entirely
+          sudo bash -c 'printf "#!/bin/sh\nprintf \"nameserver 119.29.29.29\\nnameserver 223.5.5.5\\n\" > /etc/resolv.conf 2>/dev/null\nexec /usr/local/sbin/app-runner\n" > mnt/usr/local/sbin/app-runner-fb.sh'
+          sudo chmod +x mnt/usr/local/sbin/app-runner-fb.sh
           cat mnt/usr/local/sbin/app-runner-fb.sh
           sudo umount mnt
 
