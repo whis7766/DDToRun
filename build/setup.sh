@@ -218,16 +218,32 @@ EOF
 fi
 
 # --- image size cleanup --------------------------------------------------
-# No extra kernel modules to autoload (virt kernel drivers are built in);
-# keep /etc/modules empty so nothing extra is probed at boot.
-: > /etc/modules
+# Load network drivers at boot (virtio_net for VPS, e1000 for compat/QEMU).
+cat > /etc/modules <<'EOF'
+virtio
+virtio_ring
+virtio_pci
+virtio_net
+e1000
+EOF
 rm -rf /var/cache/apk/* /usr/share/doc /usr/share/man /usr/share/info 2>/dev/null || true
 
 # VPS doesn't need firmware blobs.
 rm -rf /lib/firmware 2>/dev/null || true
 
-# Virtio drivers are built into the kernel; remove .ko modules to save space.
-find /lib/modules -name '*.ko*' -delete 2>/dev/null || true
+# Keep network driver modules (virtio_net, e1000) and their deps; delete the rest.
+# virtio_blk/virtio_pci are built-in, but virtio_net/e1000 may be modules.
+KEEP_MODS="virtio_net.ko virtio_pci.ko virtio.ko virtio_ring.ko net.ko stp.ko llc.ko e1000.ko mii.ko"
+find /lib/modules -name '*.ko*' | while read m; do
+  keep=0
+  for k in $KEEP_MODS; do
+    case "$m" in *"$k") keep=1;; esac
+  done
+  [ "$keep" = "0" ] && rm -f "$m"
+done
+# Also remove module dependency files that aren't needed, but keep modules.dep
+find /lib/modules -name '*.ko*' | wc -l
+echo "==> kept network modules above"
 
 # Keep only the CJK font; remove other fonts to save space.
 find /usr/share/fonts -type f ! -iname 'wqy*' -delete 2>/dev/null || true
