@@ -17,20 +17,11 @@ iface eth0 inet dhcp
 EOF
 rc-update add networking boot
 
-# Static Chinese DNS (overwrite whatever DHCP hands out).
-# udhcpc will rewrite resolv.conf on DHCP, so we also add a local.d script
-# that runs after networking and forces it back.
-cat > /etc/resolv.conf <<'EOF'
-nameserver 119.29.29.29
-nameserver 223.5.5.5
+# Disable IPv6 entirely (VPS has no IPv6 route; avoids IPv6 DNS timeouts).
+cat > /etc/sysctl.conf <<'EOF'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
 EOF
-mkdir -p /etc/local.d
-cat > /etc/local.d/00-dns.start <<'SCRIPT'
-#!/bin/sh
-echo -e "nameserver 119.29.29.29\nnameserver 223.5.5.5" > /etc/resolv.conf
-SCRIPT
-chmod +x /etc/local.d/00-dns.start
-rc-update add local default
 
 # --- single-app appliance: disable unused services/processes -------------
 # Drop crond (no scheduled jobs), syslog/klogd (app writes its own log +
