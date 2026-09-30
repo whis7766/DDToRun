@@ -45,7 +45,7 @@ jobs:
       - name: Build image
         run: |
           chmod +x build/build.sh
-          APP_URL="${{ github.event.inputs.app_url }}" \
+          sudo env APP_URL="${{ github.event.inputs.app_url }}" \
           RELEASE_TAG="${{ github.event.inputs.release_tag }}" \
           IMAGE_SIZE_GB=1 \
           ALPINE_BRANCH=edge \
