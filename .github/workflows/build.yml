@@ -79,10 +79,14 @@ jobs:
         run: |
           set +e
           sudo apt-get install -y qemu-system-x86
+          # Grant KVM access
+          sudo chmod 666 /dev/kvm 2>/dev/null || echo "no /dev/kvm, using TCG"
+          ls -la /dev/kvm 2>/dev/null
           cd "$GITHUB_WORKSPACE/dist"
           zstd -d -f vpsapp -o test.img
           echo "Starting QEMU..."
           qemu-system-x86_64 \
+            -enable-kvm \
             -m 512 -smp 2 \
             -drive format=raw,file=test.img,if=virtio \
             -netdev user,id=n0 -device virtio-net,netdev=n0 \
