@@ -24,10 +24,18 @@ net.ipv6.conf.default.disable_ipv6 = 1
 EOF
 
 # Static IPv4 DNS (DHCP may hand out IPv6 resolvers we can't reach).
+# Write it now and again in local.d (runs after networking in default runlevel).
 cat > /etc/resolv.conf <<'EOF'
 nameserver 119.29.29.29
 nameserver 223.5.5.5
 EOF
+mkdir -p /etc/local.d
+cat > /etc/local.d/00-dns.start <<'SCRIPT'
+#!/bin/sh
+printf 'nameserver 119.29.29.29\nnameserver 223.5.5.5\n' > /etc/resolv.conf
+SCRIPT
+chmod +x /etc/local.d/00-dns.start
+rc-update add local default
 
 # --- single-app appliance: disable unused services/processes -------------
 # Drop crond (no scheduled jobs), syslog/klogd (app writes its own log +
