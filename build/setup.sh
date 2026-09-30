@@ -246,14 +246,13 @@ done
 depmod -a 2>/dev/null || true
 echo "==> kept network modules:"
 find /lib/modules -name '*.ko*' 2>/dev/null
-# Enable BBR for better network performance (set in local.d after modules load).
+# Enable BBR for better network performance (write directly to /proc/sys).
 cat > /etc/local.d/10-bbr.start <<'EOF'
 #!/bin/sh
 modprobe tcp_bbr 2>/dev/null
 modprobe sch_fq 2>/dev/null
-echo "net.core.default_qdisc=fq" > /etc/sysctl.d/10-bbr.conf
-echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/10-bbr.conf
-sysctl -p /etc/sysctl.d/10-bbr.conf 2>/dev/null
+echo fq > /proc/sys/net/core/default_qdisc 2>/dev/null
+echo bbr > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
 EOF
 chmod +x /etc/local.d/10-bbr.start
 
