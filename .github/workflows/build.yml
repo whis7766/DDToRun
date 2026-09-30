@@ -80,16 +80,18 @@ jobs:
           sudo apt-get install -y qemu-system-x86
           cd "$GITHUB_WORKSPACE/dist"
           zstd -d -f vpsapp -o test.img
-          # Boot in QEMU with KVM (public repo runners have /dev/kvm).
+          # Use KVM if available, fall back to TCG.
+          KVM_ARG=""
+          [ -e /dev/kvm ] && KVM_ARG="-enable-kvm" && echo "KVM available" || echo "KVM not available, using TCG"
           qemu-system-x86_64 \
-            -enable-kvm \
+            $KVM_ARG \
             -m 512 -smp 2 \
             -drive format=raw,file=test.img,if=virtio \
             -netdev user,id=n0 -device virtio-net,netdev=n0 \
             -nographic -serial file:console.log \
             -display none &
           QPID=$!
-          for i in $(seq 1 60); do
+          for i in $(seq 1 90); do
             sleep 2
             if grep -q "app-runner" console.log 2>/dev/null; then
               echo "app-runner detected after $((i*2))s"
