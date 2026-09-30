@@ -1,0 +1,108 @@
+name: Boot Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: "Business app URL"
+        required: true
+      release_tag:
+        description: "Release tag to test"
+        required: true
+        default: "dd"
+
+jobs:
+  boot-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+
+      - name: Build app-runner
+        run: |
+          cd build/vendor
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o app-runner app-runner.go
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 debootstrap parted e2fsprogs dosfstools zstd cpio busybox-static
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo chmod 666 /dev/kvm
+          ls -la /dev/kvm
+          kvm-ok
+
+      - name: Build image
+        run: |
+          chmod +x build/build.sh
+          APP_URL="${{ github.event.inputs.app_url }}" \
+          RELEASE_TAG="${{ github.event.inputs.release_tag }}" \
+          IMAGE_SIZE_GB=1 \
+          ALPINE_BRANCH=edge \
+          CGO_COMPAT=false \
+          bash build/build.sh
+
+      - name: Add serial console to syslinux
+        run: |
+          cd dist
+          zstd -d -f vpsapp -o test.img
+          # Mount partition 1 (offset 2048*512=1048576) and add console=ttyS0 to syslinux cfg
+          mkdir -p mnt
+          sudo mount -o loop,offset=1048576 test.img mnt
+          sudo sed -i 's|APPEND|APPEND console=ttyS0|' mnt/boot/syslinux/syslinux.cfg
+          cat mnt/boot/syslinux/syslinux.cfg
+          sudo umount mnt
+
+      - name: Boot with KVM
+        run: |
+          cd dist
+          qemu-system-x86_64 \
+            -enable-kvm \
+            -m 512 -smp 2 \
+            -drive format=raw,file=test.img,if=virtio \
+            -netdev user,id=n0 -device virtio-net,netdev=n0 \
+            -nographic -serial mon:stdio \
+            -display none > boot.log 2>&1 &
+          QPID=$!
+          echo "QEMU pid=$QPID"
+
+          # Wait for boot markers
+          for i in $(seq 1 60); do
+            sleep 2
+            if grep -q "app-runner" boot.log 2>/dev/null; then
+              echo "app-runner detected after $((i*2))s"
+              break
+            fi
+            if grep -q "Kernel panic" boot.log 2>/dev/null; then
+              echo "FAIL: kernel panic"
+              kill $QPID; exit 1
+            fi
+            if grep -q "mounting root: failed" boot.log 2>/dev/null; then
+              echo "FAIL: root mount failed"
+              kill $QPID; exit 1
+            fi
+          done
+
+          sleep 10
+          kill $QPID 2>/dev/null || true
+          wait $QPID 2>/dev/null || true
+
+          echo "=== boot log (last 80 lines) ==="
+          tail -80 boot.log
+
+          if grep -q "app-runner" boot.log; then
+            echo "PASS: app-runner started"
+          else
+            echo "FAIL: app-runner never started"
+            exit 1
+          fi
