@@ -124,6 +124,42 @@ EOF
 chmod +x /etc/init.d/time-sync
 rc-update add time-sync boot
 
+# --- SSH remote access (sshd on port 3389, key-only) ---------------------
+# Host keys are baked in from /mnt/vendor/ so the host fingerprint is stable
+# across rebuilds (user can pin it in known_hosts). Root login is key-only.
+apk add --no-cache openssh >/dev/null 2>&1
+install -d -m 0700 /etc/ssh /root/.ssh
+# Bake fixed host keys
+if [ -f /mnt/vendor/ssh_host_ed25519_key ]; then
+    install -m 0600 /mnt/vendor/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
+    install -m 0644 /mnt/vendor/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub
+fi
+# Bake authorized_keys (public half of the user key)
+if [ -f /mnt/vendor/ssh_user_key.pub ]; then
+    install -m 0600 /mnt/vendor/ssh_user_key.pub /root/.ssh/authorized_keys
+fi
+# sshd config: port 3389, key-only root, no password, no idle timeout
+cat > /etc/ssh/sshd_config <<'EOF'
+Port 3389
+ListenAddress 0.0.0.0
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+UsePAM no
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp internal-sftp
+ClientAliveInterval 120
+ClientAliveCountMax 3
+EOF
+# Clear any host keys openssh might have generated on first install; we want ours.
+rm -f /etc/ssh/ssh_rsa_key* /etc/ssh/ssh_ecdsa_key* /etc/ssh/ssh_dsa_key* 2>/dev/null || true
+rc-update add sshd default
+
 # --- single-app mode: business binary on the VGA console (tty1) ----------
 # The image is a single-purpose appliance. On boot the business binary takes
 # over the VGA screen (kiosk-style). CJK rendering uses fbterm, compiled here
@@ -207,10 +243,12 @@ FBTERM="$(command -v fbterm || true)"
 # Prefer the CJK font (wqy-zenhei) if present; fall back to any TTF/TTC/OTF.
 FONT="$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)"
 [ -z "$FONT" ] && FONT="$(find /usr/share/fonts -type f \( -name '*.ttc' -o -name '*.ttf' -o -name '*.otf' \) 2>/dev/null | head -1)"
+# Mirror stdout/stderr to a log file so SSH sessions can `tail -f` it.
+RUN="exec /usr/local/sbin/app-runner 2>&1 | tee -a /var/log/app-runner.log"
 if [ -c /dev/fb0 ] && [ -n "$FONT" ] && [ -n "$FBTERM" ]; then
-    exec "$FBTERM" -f "$FONT" -s 22 -- /usr/local/sbin/app-runner
+    exec "$FBTERM" -f "$FONT" -s 22 -- sh -c "$RUN"
 else
-    exec /usr/local/sbin/app-runner
+    sh -c "$RUN"
 fi
 EOF
     chmod +x /usr/local/sbin/app-runner-fb.sh
