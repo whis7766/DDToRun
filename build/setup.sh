@@ -148,7 +148,6 @@ PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys
 PermitEmptyPasswords no
 ChallengeResponseAuthentication no
-UsePAM no
 X11Forwarding no
 PrintMotd no
 AcceptEnv LANG LC_*
