@@ -6,6 +6,8 @@ build/vendor/app-runner
 build/vendor/app-runner.exe
 build/vendor/apk.static
 build/vendor/fbterm-src.tar.gz
+# User private SSH key - delivered to user directly, never committed
+build/vendor/ssh_user_key
 
 # Editor / OS noise
 .DS_Store
