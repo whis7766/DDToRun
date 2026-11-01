@@ -140,6 +140,8 @@ MBR_TMP="$(mktemp /tmp/mbr.XXXXXX.bin)"
 MNT_DIR="$(mktemp -d /tmp/mbr-mnt.XXXXXX)"
 if mount "$PART_DEV" "$MNT_DIR" 2>/dev/null; then
   cp "$MNT_DIR/usr/share/syslinux/mbr.bin" "$MBR_TMP" 2>/dev/null || true
+  rm -f "$MNT_DIR"/boot/System.map-* "$MNT_DIR"/boot/config-*
+  sync
   umount "$MNT_DIR" 2>/dev/null || true
 fi
 rmdir "$MNT_DIR" 2>/dev/null || true

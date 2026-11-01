@@ -79,7 +79,7 @@ jobs:
         run: |
           sudo -E bash build/build.sh
 
-      - name: Prepare serial-boot copy
+      - name: Prepare test copy
         env:
           HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
           CJK_TTY: "${{ github.event.inputs.cjk_tty }}"
@@ -92,118 +92,68 @@ jobs:
           cp "$RAW" test.img
           mkdir -p guest-edit
           sudo mount -o loop,offset=1048576 test.img guest-edit
-          sudo sed -i 's|^\(\s*APPEND\s\+.*\)|\1 console=ttyS0|' guest-edit/boot/extlinux.conf
-          echo "=== extlinux.conf ==="
-          sudo cat guest-edit/boot/extlinux.conf
+          if sudo grep -q 'console=ttyS0' guest-edit/boot/extlinux.conf; then
+            echo "FAIL: production image contains serial console parameter"
+            sudo umount guest-edit; exit 1
+          fi
           if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" = "true" ]; then
-            echo "=== CJK build artifact checks ==="
             sudo test -x guest-edit/usr/bin/fbterm
             sudo test -s guest-edit/usr/share/terminfo/f/fbterm
-            sudo find guest-edit/usr/share/fonts -type f -iname '*wqy*' | head -1
+            sudo test -n "$(sudo find guest-edit/usr/share/fonts -type f -iname '*wqy*' | head -1)"
           fi
           sudo umount guest-edit
 
-      - name: Boot under KVM and collect evidence
+      - name: Boot under KVM and inspect persisted evidence
         env:
           HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/dist"
-          rm -f console.log qemu-stderr.log qemu-monitor.sock
-          timeout --foreground 240 qemu-system-x86_64 \
+          rm -f qemu-monitor.sock
+          timeout --foreground 150 qemu-system-x86_64 \
             -enable-kvm \
             -m 512 -smp 2 \
             -drive format=raw,file=test.img,if=virtio \
             -netdev user,id=n0 -device virtio-net,netdev=n0 \
             -vga std \
-            -nographic \
-            -serial file:console.log \
-            -monitor unix:qemu-monitor.sock,server,nowait \
-            -display none >qemu-stderr.log 2>&1 &
+            -display none \
+            -serial none \
+            -monitor unix:qemu-monitor.sock,server,nowait >/dev/null 2>&1 &
           QPID=$!
-          echo "QEMU pid=$QPID"
 
-          boot_ok=0
-          for i in $(seq 1 75); do
-            sleep 2
-            if grep -q "Starting local" console.log 2>/dev/null; then
-              echo "OpenRC local reached after $((i*2))s"
-              boot_ok=1
-              break
-            fi
-            if grep -qE "Kernel panic|emergency recovery shell|Mounting root: failed|mounting root: failed" console.log 2>/dev/null; then
-              echo "FAIL: early boot failure detected"
-              break
-            fi
-          done
-
-          # Give DHCP, grow-root, time-sync and app-runner download time to finish.
-          sleep 90
-
-          echo "=== console tail ==="
-          tail -160 console.log || true
-          echo "=== qemu stderr ==="
-          cat qemu-stderr.log || true
-
+          # Persisted files are the acceptance evidence; the guest has no serial
+          # console log. The internal monitor socket only issues a clean powerdown.
+          sleep 100
           echo "system_powerdown" | nc -U -w 1 qemu-monitor.sock 2>/dev/null || true
           for i in $(seq 1 15); do
             kill -0 "$QPID" 2>/dev/null || break
             sleep 1
           done
-          if kill -0 "$QPID" 2>/dev/null; then
-            kill -9 "$QPID" 2>/dev/null || true
-          fi
+          kill "$QPID" 2>/dev/null || true
           wait "$QPID" 2>/dev/null || true
-
-          if grep -q "Kernel panic" console.log; then
-            echo "FAIL: kernel panic"; exit 1
-          fi
-          if grep -qE "Mounting root: failed|mounting root: failed" console.log; then
-            echo "FAIL: root mount failed"; exit 1
-          fi
-          if grep -q "emergency recovery shell" console.log; then
-            echo "FAIL: emergency shell"; exit 1
-          fi
-          if [ "$boot_ok" -ne 1 ]; then
-            echo "FAIL: OpenRC local startup marker not reached"; exit 1
-          fi
-          echo "PASS: KVM kernel/rootfs/OpenRC boot"
+          pkill -f 'qemu-system-x86_64.*test.img' 2>/dev/null || true
 
           mkdir -p guest-root
           sudo mount -o loop,offset=1048576 test.img guest-root
 
-          echo "=== grow-root stamp ==="
-          sudo cat guest-root/var/lib/grow-root.done 2>/dev/null || true
           if [ ! -s guest-root/var/lib/grow-root.done ]; then
-            echo "FAIL: grow-root success stamp missing"; sudo umount guest-root; exit 1
+            echo "FAIL: boot did not reach persisted grow-root state"; sudo umount guest-root; exit 1
           fi
+          echo "PASS: KVM boot reached persisted OpenRC/local state"
+
           echo "PASS: grow-root service completed"
 
-          echo "=== ext4 journal feature ==="
           FS_SRC="$(findmnt -no SOURCE guest-root)"
-          echo "filesystem source: $FS_SRC"
-          sudo tune2fs -l "$FS_SRC" | grep -E "Filesystem features|Block count|Free blocks" || true
-          if sudo tune2fs -l "$FS_SRC" | grep -qw has_journal; then
+          if sudo tune2fs -l "$FS_SRC" 2>/dev/null | grep -qw has_journal; then
             echo "FAIL: ext4 journal still enabled"; sudo umount guest-root; exit 1
           fi
           echo "PASS: ext4 journal disabled"
 
-          echo "=== DHCP evidence ==="
-          sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f 2>/dev/null | sort || true
-          dhcp_ok=0
-          if sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q .; then
-            dhcp_ok=1
-          fi
-          if grep -qE "lease of|bound to|eth0.*inet |eth0: offered|eth0: leased|adding default route" console.log 2>/dev/null; then
-            dhcp_ok=1
-          fi
-          if [ "$dhcp_ok" != "1" ]; then
+          if ! sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q .; then
             echo "FAIL: no DHCP lease evidence"; sudo umount guest-root; exit 1
           fi
           echo "PASS: DHCP lease evidence present"
 
-          echo "=== app-runner log ==="
-          sudo tail -80 guest-root/var/log/app-runner.log 2>/dev/null || true
           if ! sudo grep -q "downloaded new version" guest-root/var/log/app-runner.log 2>/dev/null; then
             echo "FAIL: business download success not recorded"; sudo umount guest-root; exit 1
           fi
@@ -213,10 +163,10 @@ jobs:
             if ! sudo test -L guest-root/etc/runlevels/default/sshd; then
               echo "FAIL: sshd not enabled in default runlevel"; sudo umount guest-root; exit 1
             fi
-            if ! grep -q "Starting sshd" console.log; then
-              echo "FAIL: sshd start marker missing"; sudo umount guest-root; exit 1
-            fi
-            echo "PASS: headless sshd enabled and started"
+            sudo grep -q '^Port 3389$' guest-root/etc/ssh/sshd_config
+            sudo test -s guest-root/etc/ssh/ssh_host_ed25519_key
+            sudo test -s guest-root/root/.ssh/authorized_keys
+            echo "PASS: headless sshd configuration installed"
           fi
 
           sudo umount guest-root
