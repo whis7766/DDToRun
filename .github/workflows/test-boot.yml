@@ -1,174 +1,205 @@
-name: Boot Test
+name: Independent KVM Boot Test
 
 on:
   workflow_dispatch:
     inputs:
       app_url:
-        description: "Business app URL"
-        required: true
-      release_tag:
-        description: "Release tag to test"
-        required: true
-        default: "dd"
+        description: "Business binary download URL"
+        required: false
+        type: string
+        default: "https://furryfree.pages.dev/release?token=jaJ81HfL&filename=subs-check_linux_amd64v3&tag=ctyun"
       headless_ssh:
-        description: "Build and boot the lightweight SSH-only variant"
+        description: "Test SSH-only lightweight variant"
         required: true
         default: false
         type: boolean
+      cjk_tty:
+        description: "Test CJK VGA console components (ignored for headless SSH)"
+        required: true
+        default: true
+        type: boolean
+      image_size_gb:
+        description: "Raw image size in GB"
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
 jobs:
-  boot-test:
+  kvm-boot-test:
+    name: KVM boot, grow, DHCP, download
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.27.x"
+          cache: false
 
-      - name: Build app-runner
+      - name: Build static app-runner
         run: |
           cd build/vendor
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o app-runner app-runner.go
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 goamd64=v3 go build -trimpath \
+            -ldflags "-s -w" -o app-runner app-runner.go
 
-      - name: Install build deps
+      - name: Install host test/build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 debootstrap parted e2fsprogs dosfstools zstd cpio busybox-static
+          sudo apt-get install -y -qq \
+            qemu-system-x86 qemu-utils cpu-checker \
+            rsync sfdisk e2fsprogs zerofree zstd \
+            netcat-openbsd
 
-      - name: Enable KVM
+      - name: Verify KVM
         run: |
+          set -e
+          sudo modprobe kvm 2>/dev/null || true
+          sudo modprobe kvm_intel 2>/dev/null || sudo modprobe kvm_amd 2>/dev/null || true
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          sudo chmod 666 /dev/kvm
-          ls -la /dev/kvm
+          sudo udevadm control --reload-rules 2>/dev/null || true
+          sudo udevadm trigger --name-match=kvm 2>/dev/null || true
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+          ls -l /dev/kvm
           kvm-ok
 
-      - name: Build image
+      - name: Build test image (no release upload)
+        env:
+          APP_URL: "${{ github.event.inputs.app_url }}"
+          IMAGE_SIZE_GB: "${{ github.event.inputs.image_size_gb }}"
+          ALPINE_BRANCH: "edge"
+          CGO_COMPAT: "false"
+          HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
+          CJK_TTY: "${{ github.event.inputs.cjk_tty }}"
         run: |
-          chmod +x build/build.sh
-          sudo env APP_URL="${{ github.event.inputs.app_url }}" \
-          RELEASE_TAG="${{ github.event.inputs.release_tag }}" \
-          HEADLESS_SSH="${{ github.event.inputs.headless_ssh }}" \
-          IMAGE_SIZE_GB=1 \
-          ALPINE_BRANCH=edge \
-          CGO_COMPAT=false \
-          bash build/build.sh
+          sudo -E bash build/build.sh
 
-      - name: Add serial console to syslinux
+      - name: Prepare serial-boot copy
         env:
           HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
+          CJK_TTY: "${{ github.event.inputs.cjk_tty }}"
         run: |
-          sudo chown -R runner:runner dist
-          cd dist
-          ls -la
-          RAW=$(ls *.raw *.img 2>/dev/null | head -1)
-          echo "Found raw image: $RAW"
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/dist"
+          sudo chown -R "$(id -un):$(id -gn)" .
+          RAW="vps-app-runner.img.raw"
+          test -s "$RAW"
           cp "$RAW" test.img
-          mkdir -p mnt
-          sudo mount -o loop,offset=1048576 test.img mnt
-          sudo sed -i 's|APPEND|APPEND console=ttyS0|' mnt/boot/extlinux.conf
-          cat mnt/boot/extlinux.conf
-          if [ "$HEADLESS_SSH" != "true" ]; then
-            # Kiosk image: redirect app-runner to serial for test visibility.
-            sudo sed -i 's|tty1::respawn|ttyS0::respawn|' mnt/etc/inittab
-            echo "--- modified inittab ---"
-            grep tty mnt/etc/inittab
-            sudo bash -c 'printf "#!/bin/sh\nprintf \"nameserver 119.29.29.29\\nnameserver 223.5.5.5\\n\" > /etc/resolv.conf 2>/dev/null\nexec /usr/local/sbin/app-runner\n" > mnt/usr/local/sbin/app-runner-fb.sh'
-            sudo chmod +x mnt/usr/local/sbin/app-runner-fb.sh
-            cat mnt/usr/local/sbin/app-runner-fb.sh
-          else
-            echo "Headless build: keeping background app service; no VGA wrapper override"
+          mkdir -p guest-edit
+          sudo mount -o loop,offset=1048576 test.img guest-edit
+          sudo sed -i 's|^\(\s*APPEND\s\+.*\)|\1 console=ttyS0|' guest-edit/boot/extlinux.conf
+          echo "=== extlinux.conf ==="
+          sudo cat guest-edit/boot/extlinux.conf
+          if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" = "true" ]; then
+            echo "=== CJK build artifact checks ==="
+            sudo test -x guest-edit/usr/bin/fbterm
+            sudo test -s guest-edit/usr/share/terminfo/f/fbterm
+            sudo find guest-edit/usr/share/fonts -type f -iname '*wqy*' | head -1
           fi
-          sudo umount mnt
+          sudo umount guest-edit
 
-      - name: Boot with KVM
+      - name: Boot under KVM and collect evidence
         env:
           HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
         run: |
-          cd dist
+          set -u
+          cd "$GITHUB_WORKSPACE/dist"
+          rm -f console.log qemu-stderr.log qemu-monitor.sock
           qemu-system-x86_64 \
             -enable-kvm \
             -m 512 -smp 2 \
             -drive format=raw,file=test.img,if=virtio \
             -netdev user,id=n0 -device virtio-net,netdev=n0 \
-            -nographic -serial mon:stdio \
-            -display none > boot.log 2>&1 &
+            -vga std \
+            -nographic \
+            -serial file:console.log \
+            -monitor unix:qemu-monitor.sock,server,nowait \
+            -display none >qemu-stderr.log 2>&1 &
           QPID=$!
           echo "QEMU pid=$QPID"
 
-          # Phase 1: wait for boot
-          for i in $(seq 1 30); do
+          boot_ok=0
+          for i in $(seq 1 75); do
             sleep 2
-            if grep -q "Starting local" boot.log 2>/dev/null; then
-              echo "Boot completed after $((i*2))s"
+            if grep -q "Starting local" console.log 2>/dev/null; then
+              echo "OpenRC local reached after $((i*2))s"
+              boot_ok=1
               break
             fi
-            if grep -q "Kernel panic" boot.log 2>/dev/null; then
-              echo "FAIL: kernel panic"
-              kill $QPID; exit 1
+            if grep -qE "Kernel panic|emergency recovery shell|Mounting root: failed|mounting root: failed" console.log 2>/dev/null; then
+              echo "FAIL: early boot failure detected"
+              break
             fi
           done
 
-          # Phase 2: wait for app-runner download. Kiosk builds print to serial;
-          # headless builds log inside the guest filesystem and are inspected below.
-          echo "Waiting for app-runner download..."
-          if [ "$HEADLESS_SSH" != "true" ]; then
-            for i in $(seq 1 60); do
-              sleep 2
-              if grep -qE "app-runner.*starting|fetch attempt|downloaded|尚无可|no app available|尚未有" boot.log 2>/dev/null; then
-                echo "app-runner output detected after $((i*2))s"
-                break
-              fi
-            done
-          fi
+          # Give DHCP, grow-root, time-sync and app-runner download time to finish.
+          sleep 45
 
-          sleep 15
-          kill $QPID 2>/dev/null || true
-          wait $QPID 2>/dev/null || true
+          echo "=== console tail ==="
+          tail -160 console.log || true
+          echo "=== qemu stderr ==="
+          cat qemu-stderr.log || true
 
-          echo "=== boot log (last 100 lines) ==="
-          tail -100 boot.log
+          echo "system_powerdown" | nc -U qemu-monitor.sock 2>/dev/null || true
+          for i in $(seq 1 15); do
+            kill -0 "$QPID" 2>/dev/null || break
+            sleep 1
+          done
+          kill "$QPID" 2>/dev/null || true
+          wait "$QPID" 2>/dev/null || true
 
-          # Checks
-          if grep -q "Kernel panic" boot.log; then
+          if grep -q "Kernel panic" console.log; then
             echo "FAIL: kernel panic"; exit 1
           fi
-          if grep -q "mounting root: failed" boot.log; then
+          if grep -qE "Mounting root: failed|mounting root: failed" console.log; then
             echo "FAIL: root mount failed"; exit 1
           fi
-          if grep -q "emergency recovery shell" boot.log; then
+          if grep -q "emergency recovery shell" console.log; then
             echo "FAIL: emergency shell"; exit 1
           fi
-          # Check root auto-grow
-          if ! grep -q "Growing root filesystem" boot.log; then
-            echo "FAIL: root auto-grow not detected"; exit 1
+          if [ "$boot_ok" -ne 1 ]; then
+            echo "FAIL: OpenRC local startup marker not reached"; exit 1
           fi
-          echo "PASS: root auto-grow detected"
-          # Check network DHCP
-          if ! grep -q "lease of" boot.log; then
-            echo "FAIL: no DHCP lease"; exit 1
+          echo "PASS: KVM kernel/rootfs/OpenRC boot"
+
+          mkdir -p guest-root
+          sudo mount -o ro,loop,offset=1048576 test.img guest-root
+
+          echo "=== grow-root stamp ==="
+          sudo cat guest-root/var/lib/grow-root.done 2>/dev/null || true
+          if [ ! -s guest-root/var/lib/grow-root.done ]; then
+            echo "FAIL: grow-root success stamp missing"; sudo umount guest-root; exit 1
           fi
-          echo "PASS: DHCP lease obtained"
-          # Check app-runner started
+          echo "PASS: grow-root service completed"
+
+          echo "=== DHCP evidence ==="
+          sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f 2>/dev/null | sort
+          if ! sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q .; then
+            echo "FAIL: no DHCP lease file in guest"; sudo umount guest-root; exit 1
+          fi
+          echo "PASS: DHCP lease evidence present"
+
+          echo "=== app-runner log ==="
+          sudo tail -80 guest-root/var/log/app-runner.log 2>/dev/null || true
+          if ! sudo grep -q "downloaded new version" guest-root/var/log/app-runner.log 2>/dev/null; then
+            echo "FAIL: business download success not recorded"; sudo umount guest-root; exit 1
+          fi
+          echo "PASS: business binary downloaded and recorded"
+
           if [ "$HEADLESS_SSH" = "true" ]; then
-            if ! grep -q "Starting sshd" boot.log; then
-              echo "FAIL: sshd not started"; exit 1
+            if ! sudo test -L guest-root/etc/runlevels/default/sshd; then
+              echo "FAIL: sshd not enabled in default runlevel"; sudo umount guest-root; exit 1
             fi
-            echo "PASS: sshd started"
-            mkdir -p guest-root
-            sudo mount -o ro,loop,offset=1048576 test.img guest-root
-            echo "=== guest app log ==="
-            sudo tail -40 guest-root/var/log/app-runner.log 2>/dev/null
-            if ! sudo grep -q "downloaded new version" guest-root/var/log/app-runner.log 2>/dev/null; then
-              sudo umount guest-root; echo "FAIL: no recorded download"; exit 1
+            if ! grep -q "Starting sshd" console.log; then
+              echo "FAIL: sshd start marker missing"; sudo umount guest-root; exit 1
             fi
-            sudo umount guest-root
-            echo "PASS: app-runner recorded successful download"
-          elif ! grep -qE "app-runner|fetch|download|starting" boot.log; then
-            echo "FAIL: app-runner never started"; exit 1
-          else
-            echo "PASS: app-runner started"
+            echo "PASS: headless sshd enabled and started"
           fi
+
+          sudo umount guest-root
+          echo "PASS: independent KVM boot test completed"

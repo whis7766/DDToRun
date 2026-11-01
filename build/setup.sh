@@ -248,6 +248,7 @@ if [ -n "$APP_URL" ]; then
 description="Download and run the business application"
 supervisor=supervise-daemon
 command=/usr/local/sbin/app-runner
+environment="APP_RUNNER_LOG_STDOUT_ONLY=1"
 command_user=root
 pidfile=/run/app-runner.pid
 output_log=/var/log/app-runner.log
@@ -270,6 +271,7 @@ EOF
 description="Download and run the business application"
 supervisor=supervise-daemon
 command=/usr/local/sbin/app-runner
+environment="APP_RUNNER_LOG_STDOUT_ONLY=1"
 command_user=root
 pidfile=/run/app-runner.pid
 output_log=/var/log/app-runner.log
@@ -321,7 +323,7 @@ virtio_blk
 virtio_net
 e1000
 tun
-ext2
+ext4
 mbcache
 sch_fq
 EOF

@@ -2,7 +2,7 @@
 # Build a "dd-ready" Alpine Linux VPS image with the OFFICIAL
 # alpine-make-vm-image tool (https://github.com/alpinelinux/alpine-make-vm-image).
 #
-# Layout: legacy BIOS / MBR partition table (one bootable ext2 partition,
+# Layout: legacy BIOS / MBR partition table (one bootable ext4 partition,
 # extlinux bootloader, syslinux mbr.bin in sector 0) — the most compatible
 # layout for VPS reinstall scripts and legacy-BIOS providers.
 #
@@ -15,7 +15,7 @@
 #   IMAGE_SIZE_GB  image size in GB (default 1)
 #   ALPINE_MIRROR  apk mirror (default https://dl-cdn.alpinelinux.org/alpine)
 #   ALPINE_BRANCH  alpine branch (default v3.22)
-#   KERNEL_FLAVOR  kernel flavor (default lts; required for ext2 rootfs module)
+#   KERNEL_FLAVOR  kernel flavor (default virt; official lightweight VM kernel)
 #   PACKAGES       extra apk packages (space separated)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,7 +24,7 @@ APP_URL="${APP_URL:-}"
 IMAGE_SIZE_GB="${IMAGE_SIZE_GB:-1}"
 ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 ALPINE_BRANCH="${ALPINE_BRANCH:-v3.22}"
-KERNEL_FLAVOR="${KERNEL_FLAVOR:-lts}"
+KERNEL_FLAVOR="${KERNEL_FLAVOR:-virt}"
 HEADLESS_SSH="${HEADLESS_SSH:-false}"
 CJK_TTY="${CJK_TTY:-true}"
 # Headless SSH mode drops fbterm, CJK fonts, and the VGA kiosk takeover; the
@@ -46,7 +46,7 @@ IMG="$WORK/vps-app-runner.raw"
 TOOL="$WORK/alpine-make-vm-image"
 
 # --- 0. host deps --------------------------------------------------------
-for c in losetup rsync sfdisk mkfs.ext2 curl tar zerofree; do
+for c in losetup rsync sfdisk mkfs.ext4 curl tar zerofree; do
   command -v "$c" >/dev/null 2>&1 || { echo "missing host dep: $c"; exit 1; }
 done
 
@@ -126,7 +126,7 @@ APP_URL="$APP_URL" APK="$APK" HEADLESS_SSH="$HEADLESS_SSH" CJK_TTY="$CJK_TTY" \
   --branch "$ALPINE_BRANCH" \
   --mirror-uri "$ALPINE_MIRROR" \
   --kernel-flavor "$KERNEL_FLAVOR" \
-  --rootfs ext2 \
+  --rootfs ext4 \
   --packages "$PACKAGES" \
   --script-chroot \
   "$PART_DEV" \
@@ -147,8 +147,9 @@ rmdir "$MNT_DIR" 2>/dev/null || true
 dd if="$MBR_TMP" of="$LOOP_DEV" bs=440 count=1 conv=notrunc status=none
 rm -f "$MBR_TMP"
 
-# Ext2 has no journal. Reserve no blocks for root-only userspace and zero free
-# blocks before release compression.
+# Use the official ext4 layout. Reserve no blocks for root-only userspace and
+# zero free blocks before release compression; journaling remains enabled for
+# safe power loss on real VPS hosts.
 tune2fs -m 0 "$PART_DEV" >/dev/null 2>&1 || true
 e2fsck -fy "$PART_DEV" >/dev/null 2>&1 || true
 zerofree "$PART_DEV" >/dev/null 2>&1 || true
