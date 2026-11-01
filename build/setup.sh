@@ -173,14 +173,18 @@ fi
 # over the VGA screen (kiosk-style). CJK rendering uses fbterm, compiled here
 # from source against Alpine's musl toolchain (the Alpine-native, official
 # build flow) + the official font-wqy-zenhei package. If no framebuffer/font
-# is present it degrades to the plain VGA tty. No serial console is configured
-# (production output is VGA-only); state is mirrored to a log file.
+# The default VGA kiosk uses fbterm on tty1 for CJK text. No plain VGA tty
+# fallback: a required display component failure fails the image build early.
 if [ -n "$APP_URL" ]; then
     mkdir -p /opt /usr/local/sbin /var/log
     # --- compile fbterm natively (musl) for Chinese on the VGA console ----
     # Alpine ships no fbterm package; build from upstream source in the chroot
     # with the official toolchain, then drop the dev packages again.
-    if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ] && [ -f /mnt/vendor/fbterm-src.tar.gz ]; then
+    if [ "$HEADLESS_SSH" = "true" ] || [ "$CJK_TTY" = "false" ]; then
+        echo "Skipping fbterm build for non-VGA/CJK-disabled profile"
+    elif [ ! -f /mnt/vendor/fbterm-src.tar.gz ]; then
+        echo "ERROR: fbterm source required for CJK tty but missing"; exit 1
+    else
         echo "==> compiling fbterm from source (Alpine native, CJK support)"
         apk add --no-cache build-base fontconfig-dev freetype-dev linux-headers ncurses >/dev/null 2>&1 || true
         cd /tmp
@@ -202,15 +206,7 @@ if [ -n "$APP_URL" ]; then
         fi
         cd / && rm -rf /tmp/fbterm-*
         strip /usr/bin/fbterm 2>/dev/null || true
-        # Remove ONLY build-time packages (compiler + headers + -dev). The
-        # runtime shared libraries fbterm links against (fontconfig, freetype,
-        # libstdc++) are separate packages and must stay. ncurses is kept too:
-        # it provides the terminfo database that `tic fbterm` populated and
-        # that programs inside fbterm look up via $TERM.
         apk del build-base fontconfig-dev freetype-dev linux-headers >/dev/null 2>&1 || true
-        # Hard-verify the installed binary actually has all shared libraries
-        # and can launch (file-exists is not enough; a missing lib would make
-        # tty1 respawn-loop with only a blank VGA).
         FB_BIN="$(command -v fbterm 2>/dev/null || true)"
         if [ -z "$FB_BIN" ]; then
             echo "fbterm build did not produce a binary"; exit 1
@@ -221,10 +217,6 @@ if [ -n "$APP_URL" ]; then
             echo "$missing"; exit 1
         fi
         echo "fbterm ready: $(fbterm --version 2>&1 | head -1)"
-    elif [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
-        echo "WARNING: fbterm source missing - VGA display degraded"
-    else
-        echo "CJK tty disabled: using plain VGA tty"
     fi
     # Bake the download URL into the image so the Go launcher (which has no
     # shell wrapper injecting env) can read it at runtime.
@@ -244,7 +236,7 @@ if [ -n "$APP_URL" ]; then
         echo "ERROR: /mnt/vendor/app-runner missing (host build step failed)"; exit 1
     fi
     if [ "$HEADLESS_SSH" = "true" ]; then
-        # Headless: supervised background service; output goes to its own log.
+        # Headless SSH: supervised background service; sshd remains optional.
         cat > /etc/init.d/app-runner <<'EOF'
 #!/sbin/openrc-run
 description="Download and run the business application"
@@ -252,8 +244,8 @@ supervisor=supervise-daemon
 command=/usr/local/sbin/app-runner
 command_user=root
 pidfile=/run/app-runner.pid
-output_log=/dev/null
-error_log=/dev/null
+output_log=/var/log/app-runner.log
+error_log=/var/log/app-runner.log
 depend() { need net; after time-sync sshd; }
 pre_start() {
     pkill -f '^/opt/business-app' 2>/dev/null || true
@@ -265,39 +257,56 @@ respawn_delay=2
 EOF
         chmod +x /etc/init.d/app-runner
         rc-update add app-runner default
+    elif [ "$CJK_TTY" = "false" ]; then
+        # CJK disabled: supervised background service, no VGA takeover.
+        cat > /etc/init.d/app-runner <<'EOF'
+#!/sbin/openrc-run
+description="Download and run the business application"
+supervisor=supervise-daemon
+command=/usr/local/sbin/app-runner
+command_user=root
+pidfile=/run/app-runner.pid
+output_log=/var/log/app-runner.log
+error_log=/var/log/app-runner.log
+depend() { need net; after time-sync; }
+pre_start() {
+    pkill -f '^/opt/business-app' 2>/dev/null || true
+}
+EOF
+        cat > /etc/conf.d/app-runner <<'EOF'
+respawn=respawn
+respawn_delay=2
+EOF
+        chmod +x /etc/init.d/app-runner
+        rc-update add app-runner default
     else
-        # CJK-aware launcher: fbterm (framebuffer terminal) + CJK font for Chinese;
-        # fall back to the plain VGA tty when no framebuffer / font / fbterm.
+        # Default VGA kiosk: fbterm + wqy-zenhei on tty1. Required components
+        # are verified during build; there is no plain-text tty fallback.
         cat > /usr/local/sbin/app-runner-fb.sh <<'EOF'
 #!/bin/sh
-# Force IPv4 DNS before Go starts (DHCP may have handed out unreachable IPv6).
 printf 'nameserver 119.29.29.29\nnameserver 223.5.5.5\n' > /etc/resolv.conf 2>/dev/null
-# Clear any stale business process and reset the TTY before the app takes over.
 pkill -f '^/opt/business-app' 2>/dev/null || true
 stty sane 2>/dev/null || true
 printf '\033c' 2>/dev/null || true
 printf '\033[2J\033[H' 2>/dev/null || true
 FBTERM="$(command -v fbterm || true)"
-# Prefer the CJK font (wqy-zenhei) if present; fall back to any TTF/TTC/OTF.
 FONT="$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)"
-[ -z "$FONT" ] && FONT="$(find /usr/share/fonts -type f \( -name '*.ttc' -o -name '*.ttf' -o -name '*.otf' \) 2>/dev/null | head -1)"
-# Mirror stdout/stderr to a log file so SSH sessions can `tail -f` it.
+[ -c /dev/fb0 ] || { echo "fb0 missing"; exit 1; }
+[ -n "$FBTERM" ] || { echo "fbterm missing"; exit 1; }
+[ -n "$FONT" ] || { echo "CJK font missing"; exit 1; }
 RUN="exec /usr/local/sbin/app-runner 2>&1 | tee -a /var/log/app-runner.log"
-if [ -c /dev/fb0 ] && [ -n "$FONT" ] && [ -n "$FBTERM" ]; then
-    APP_RUNNER_LOG_STDOUT_ONLY=1 exec "$FBTERM" -f "$FONT" -s 22 -- sh -c "$RUN"
-else
-    APP_RUNNER_LOG_STDOUT_ONLY=1 sh -c "$RUN"
-fi
+APP_RUNNER_LOG_STDOUT_ONLY=1 exec "$FBTERM" -f "$FONT" -s 22 -- sh -c "$RUN"
 EOF
         chmod +x /usr/local/sbin/app-runner-fb.sh
-        # take over VGA tty1 (replace getty with the app loop) - standard init
         sed -i 's|^#\?tty1::respawn:.*|tty1::respawn:/usr/local/sbin/app-runner-fb.sh|' /etc/inittab
         grep -q '^tty1::respawn:' /etc/inittab || echo 'tty1::respawn:/usr/local/sbin/app-runner-fb.sh' >> /etc/inittab
     fi
 fi
 
-# --- image size cleanup --------------------------------------------------
-# Load network drivers at boot (virtio_net for VPS, e1000 for compat/QEMU).
+# --- explicit boot modules ------------------------------------------------
+# Declare required modules explicitly; do not prune the kernel module tree
+# with a hand-maintained allowlist. Missing module availability is caught at
+# build/boot time instead of silently removing a driver.
 cat > /etc/modules <<'EOF'
 virtio
 virtio_ring
@@ -311,24 +320,7 @@ jbd2
 mbcache
 sch_fq
 EOF
-rm -rf /var/cache/apk/* /usr/share/doc /usr/share/man /usr/share/info 2>/dev/null || true
-
-# VPS doesn't need firmware blobs.
-rm -rf /lib/firmware 2>/dev/null || true
-
-# Keep network driver modules (virtio_net, e1000) and their deps; delete the rest.
-KEEP_MODS="virtio_net virtio_pci virtio virtio_ring virtio_blk virtio_scsi net af_packet stp llc e1000 mii net_failover virtio-mmio tun tcp_bbr tcp_htcp tcp_cubic sch_fq scsi_mod sd_mod sr_mod cdrom libata ata_piix ahci libahci ata_generic pata_acpi ext4 mbcache jbd2 crc32c crc16"
-find /lib/modules -name '*.ko*' | while read m; do
-  keep=0
-  for k in $KEEP_MODS; do
-    case "$(basename "$m")" in "$k".ko*) keep=1;; esac
-  done
-  [ "$keep" = "0" ] && rm -f "$m"
-done
-# Rebuild module dependency tree.
-depmod -a 2>/dev/null || true
-echo "==> kept network modules:"
-find /lib/modules -name '*.ko*' 2>/dev/null
+apk cache clean >/dev/null 2>&1 || true
 # Enable BBR/fq and basic TCP performance tuning (write directly to /proc/sys
 # to avoid sysctl service dependency on an unknown key).
 cat > /etc/local.d/10-bbr.start <<'EOF'
@@ -346,15 +338,5 @@ echo 1 > /proc/sys/net/ipv4/tcp_mtu_probing 2>/dev/null
 echo 1 > /proc/sys/net/ipv4/tcp_sack 2>/dev/null
 EOF
 chmod +x /etc/local.d/10-bbr.start
-
-if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
-    # Keep only the CJK font; remove other fonts to save space.
-    find /usr/share/fonts -type f ! -iname 'wqy*' -delete 2>/dev/null || true
-else
-    rm -rf /usr/share/fonts 2>/dev/null || true
-fi
-
-# Remove locale/i18n data.
-rm -rf /usr/share/locale /usr/share/i18n 2>/dev/null || true
 
 echo "==> setup done"
