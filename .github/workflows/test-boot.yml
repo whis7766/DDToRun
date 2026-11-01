@@ -181,8 +181,14 @@ jobs:
 
           echo "=== DHCP evidence ==="
           sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f 2>/dev/null | sort
-          if ! sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q . \
-             && ! grep -qE "lease of|bound to|eth0.*inet |eth0: offered|eth0: leased|adding default route" console.log 2>/dev/null; then
+          dhcp_ok=0
+          if sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q .; then
+            dhcp_ok=1
+          fi
+          if grep -qE "lease of|bound to|eth0.*inet |eth0: offered|eth0: leased|adding default route" console.log 2>/dev/null; then
+            dhcp_ok=1
+          fi
+          if [ "$dhcp_ok" != "1" ]; then
             echo "FAIL: no DHCP lease evidence"; sudo umount guest-root; exit 1
           fi
           echo "PASS: DHCP lease evidence present"
