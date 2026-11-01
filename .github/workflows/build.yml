@@ -26,6 +26,11 @@ on:
         required: true
         default: "false"
         type: string
+      headless_ssh:
+        description: "Lightweight SSH-only build: drop VGA/fbterm/CJK font, run app as supervised service on SSH port 3389"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -64,6 +69,7 @@ jobs:
           IMAGE_SIZE_GB: "${{ github.event.inputs.image_size_gb }}"
           ALPINE_BRANCH: "${{ github.event.inputs.alpine_branch }}"
           CGO_COMPAT: "${{ github.event.inputs.cgo_compat }}"
+          HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
         run: |
           sudo -E bash build/build.sh
 
@@ -76,6 +82,8 @@ jobs:
           zstd -q -22 --ultra --long=27 --single-thread -f "$RAW" -o "$ZST"
 
       - name: QEMU boot test
+        env:
+          HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
         run: |
           set +e
           sudo apt-get install -y qemu-system-x86 cpu-checker
@@ -105,12 +113,12 @@ jobs:
           echo "QEMU pid=$QPID"
           for i in $(seq 1 90); do
             sleep 2
-            if grep -q "app-runner" console.log 2>/dev/null; then
-              echo "app-runner detected after $((i*2))s"
+            if grep -q "Starting local" console.log 2>/dev/null; then
+              echo "Boot completed after $((i*2))s"
               break
             fi
           done
-          sleep 5
+          sleep 15
           kill $QPID 2>/dev/null
           wait $QPID 2>/dev/null
           echo "=== console log ==="
@@ -131,7 +139,23 @@ jobs:
           if grep -q "network is unreachable" console.log 2>/dev/null; then
             echo "FAIL: network unreachable"; exit 1
           fi
-          if grep -q "app-runner" console.log 2>/dev/null; then
+          if [ "$HEADLESS_SSH" = "true" ]; then
+            if grep -q "Starting sshd" console.log 2>/dev/null; then
+              echo "PASS: sshd service started"
+            else
+              echo "FAIL: sshd service not found in boot log"; exit 1
+            fi
+            mkdir -p guest-root
+            sudo mount -o ro,loop,offset=1048576 test.img guest-root
+            echo "=== guest app log ==="
+            sudo cat guest-root/var/log/app-runner.log 2>/dev/null | tail -40
+            if sudo grep -q "downloaded new version" guest-root/var/log/app-runner.log 2>/dev/null; then
+              echo "PASS: business download completed"
+            else
+              echo "FAIL: business download not recorded in guest log"; sudo umount guest-root; exit 1
+            fi
+            sudo umount guest-root
+          elif grep -q "app-runner" console.log 2>/dev/null; then
             echo "PASS: app-runner started"
           else
             echo "WARN: app-runner not seen (TCG may be too slow), not blocking publish"

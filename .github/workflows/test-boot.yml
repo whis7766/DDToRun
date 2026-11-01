@@ -10,7 +10,11 @@ on:
         description: "Release tag to test"
         required: true
         default: "dd"
-
+      headless_ssh:
+        description: "Build and boot the lightweight SSH-only variant"
+        required: true
+        default: false
+        type: boolean
 jobs:
   boot-test:
     runs-on: ubuntu-latest
@@ -47,12 +51,15 @@ jobs:
           chmod +x build/build.sh
           sudo env APP_URL="${{ github.event.inputs.app_url }}" \
           RELEASE_TAG="${{ github.event.inputs.release_tag }}" \
+          HEADLESS_SSH="${{ github.event.inputs.headless_ssh }}" \
           IMAGE_SIZE_GB=1 \
           ALPINE_BRANCH=edge \
           CGO_COMPAT=false \
           bash build/build.sh
 
       - name: Add serial console to syslinux
+        env:
+          HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
         run: |
           sudo chown -R runner:runner dist
           cd dist
@@ -60,22 +67,26 @@ jobs:
           RAW=$(ls *.raw *.img 2>/dev/null | head -1)
           echo "Found raw image: $RAW"
           cp "$RAW" test.img
-          # Mount partition 1 (offset 2048*512=1048576) and add console=ttyS0 to syslinux cfg
           mkdir -p mnt
           sudo mount -o loop,offset=1048576 test.img mnt
           sudo sed -i 's|APPEND|APPEND console=ttyS0|' mnt/boot/extlinux.conf
           cat mnt/boot/extlinux.conf
-          # Also run app-runner on serial console so we can see download output
-          sudo sed -i 's|tty1::respawn|ttyS0::respawn|' mnt/etc/inittab
-          echo "--- modified inittab ---"
-          grep tty mnt/etc/inittab
-          # On serial, skip fbterm entirely
-          sudo bash -c 'printf "#!/bin/sh\nprintf \"nameserver 119.29.29.29\\nnameserver 223.5.5.5\\n\" > /etc/resolv.conf 2>/dev/null\nexec /usr/local/sbin/app-runner\n" > mnt/usr/local/sbin/app-runner-fb.sh'
-          sudo chmod +x mnt/usr/local/sbin/app-runner-fb.sh
-          cat mnt/usr/local/sbin/app-runner-fb.sh
+          if [ "$HEADLESS_SSH" != "true" ]; then
+            # Kiosk image: redirect app-runner to serial for test visibility.
+            sudo sed -i 's|tty1::respawn|ttyS0::respawn|' mnt/etc/inittab
+            echo "--- modified inittab ---"
+            grep tty mnt/etc/inittab
+            sudo bash -c 'printf "#!/bin/sh\nprintf \"nameserver 119.29.29.29\\nnameserver 223.5.5.5\\n\" > /etc/resolv.conf 2>/dev/null\nexec /usr/local/sbin/app-runner\n" > mnt/usr/local/sbin/app-runner-fb.sh'
+            sudo chmod +x mnt/usr/local/sbin/app-runner-fb.sh
+            cat mnt/usr/local/sbin/app-runner-fb.sh
+          else
+            echo "Headless build: keeping background app service; no VGA wrapper override"
+          fi
           sudo umount mnt
 
       - name: Boot with KVM
+        env:
+          HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
         run: |
           cd dist
           qemu-system-x86_64 \
@@ -101,15 +112,18 @@ jobs:
             fi
           done
 
-          # Phase 2: wait for app-runner download (up to 120s)
+          # Phase 2: wait for app-runner download. Kiosk builds print to serial;
+          # headless builds log inside the guest filesystem and are inspected below.
           echo "Waiting for app-runner download..."
-          for i in $(seq 1 60); do
-            sleep 2
-            if grep -qE "app-runner.*starting|fetch attempt|downloaded|尚无可|no app available|尚未有" boot.log 2>/dev/null; then
-              echo "app-runner output detected after $((i*2))s"
-              break
-            fi
-          done
+          if [ "$HEADLESS_SSH" != "true" ]; then
+            for i in $(seq 1 60); do
+              sleep 2
+              if grep -qE "app-runner.*starting|fetch attempt|downloaded|尚无可|no app available|尚未有" boot.log 2>/dev/null; then
+                echo "app-runner output detected after $((i*2))s"
+                break
+              fi
+            done
+          fi
 
           sleep 15
           kill $QPID 2>/dev/null || true
@@ -139,7 +153,22 @@ jobs:
           fi
           echo "PASS: DHCP lease obtained"
           # Check app-runner started
-          if ! grep -qE "app-runner|fetch|download|starting" boot.log; then
+          if [ "$HEADLESS_SSH" = "true" ]; then
+            if ! grep -q "Starting sshd" boot.log; then
+              echo "FAIL: sshd not started"; exit 1
+            fi
+            echo "PASS: sshd started"
+            mkdir -p guest-root
+            sudo mount -o ro,loop,offset=1048576 test.img guest-root
+            echo "=== guest app log ==="
+            sudo tail -40 guest-root/var/log/app-runner.log 2>/dev/null
+            if ! sudo grep -q "downloaded new version" guest-root/var/log/app-runner.log 2>/dev/null; then
+              sudo umount guest-root; echo "FAIL: no recorded download"; exit 1
+            fi
+            sudo umount guest-root
+            echo "PASS: app-runner recorded successful download"
+          elif ! grep -qE "app-runner|fetch|download|starting" boot.log; then
             echo "FAIL: app-runner never started"; exit 1
+          else
+            echo "PASS: app-runner started"
           fi
-          echo "PASS: app-runner started"
