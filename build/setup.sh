@@ -185,18 +185,20 @@ if [ -n "$APP_URL" ]; then
     elif [ ! -f /mnt/vendor/fbterm-src.tar.gz ]; then
         echo "ERROR: fbterm source required for CJK tty but missing"; exit 1
     else
-        echo "==> compiling fbterm from source (Alpine native, CJK support)"
-        apk add --no-cache build-base fontconfig-dev freetype-dev linux-headers ncurses >/dev/null 2>&1 || true
+        echo "==> building fbterm from upstream source using its autotools guide"
+        # Build dependencies from configure.ac: C/C++ toolchain, pkg-config,
+        # freetype2/fontconfig headers, kernel headers, and ncurses for tic.
+        apk add --no-cache build-base pkgconf fontconfig-dev freetype-dev linux-headers ncurses >/dev/null 2>&1 || true
         cd /tmp
         rm -rf /tmp/fbterm-*
         tar xzf /mnt/vendor/fbterm-src.tar.gz 2>/dev/null
         FBTERM_DIR="$(find /tmp -maxdepth 1 -type d -name 'fbterm-*' | head -1)"
         [ -n "$FBTERM_DIR" ] || { echo "fbterm source did not extract to a fbterm-* directory"; exit 1; }
-        # musl on Alpine edge doesn't expose WAIT_ANY; provide a fallback.
-        sed -i 's|WAIT_ANY|((pid_t)-1)|g' "$FBTERM_DIR/src/fbterm.cpp"
-        FB_CXXFLAGS="-D_GNU_SOURCE -include sys/select.h -include sys/time.h -include unistd.h -Wno-error=narrowing -Wno-narrowing"
+        # musl does not define WAIT_ANY; pass it through CXXFLAGS instead of
+        # editing upstream source. Disable optional subsystems not needed here.
+        FB_CXXFLAGS="-DWAIT_ANY=((pid_t)-1) -Wno-narrowing"
         if ( cd "$FBTERM_DIR" \
-             && CXXFLAGS="$FB_CXXFLAGS" ./configure --prefix=/usr --disable-signalfd >/tmp/fbterm-build.log 2>&1 \
+             && CXXFLAGS="$FB_CXXFLAGS" ./configure --prefix=/usr --disable-gpm --disable-vesa --disable-signalfd >/tmp/fbterm-build.log 2>&1 \
              && make -j"$(nproc)" CXXFLAGS="$FB_CXXFLAGS" >>/tmp/fbterm-build.log 2>&1 \
              && make install >>/tmp/fbterm-build.log 2>&1 ); then
             :
@@ -206,10 +208,13 @@ if [ -n "$APP_URL" ]; then
         fi
         cd / && rm -rf /tmp/fbterm-*
         strip /usr/bin/fbterm 2>/dev/null || true
-        apk del build-base fontconfig-dev freetype-dev linux-headers >/dev/null 2>&1 || true
+        apk del build-base pkgconf fontconfig-dev freetype-dev linux-headers >/dev/null 2>&1 || true
         FB_BIN="$(command -v fbterm 2>/dev/null || true)"
         if [ -z "$FB_BIN" ]; then
             echo "fbterm build did not produce a binary"; exit 1
+        fi
+        if ! infocmp fbterm >/dev/null 2>&1; then
+            echo "fbterm terminfo entry was not installed"; exit 1
         fi
         missing="$(ldd "$FB_BIN" 2>&1 | grep -iE 'not found|no such|error loading' || true)"
         if [ -n "$missing" ]; then
