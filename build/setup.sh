@@ -57,6 +57,7 @@ rc-update del hwdrivers sysinit >/dev/null 2>&1 || true
 # Keep sysctl boot: we need it to apply disable_ipv6.
 rc-update del dmesg sysinit >/dev/null 2>&1 || true
 
+sed -i '/^#\?ttyS0::respawn:/d' /etc/inittab
 if [ "$HEADLESS_SSH" = "true" ]; then
     # Headless: no VGA console login; access the box over SSH only.
     sed -i 's|^#\?tty[1-6]::respawn:.*|#&|' /etc/inittab
