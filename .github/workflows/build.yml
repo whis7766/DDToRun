@@ -187,7 +187,7 @@ jobs:
           echo "PASS: root auto-grow completed"
 
           echo "=== DHCP evidence ==="
-          sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f 2>/dev/null | sort
+          sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f 2>/dev/null | sort || true
           dhcp_ok=0
           if sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q .; then
             dhcp_ok=1
