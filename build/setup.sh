@@ -102,11 +102,21 @@ start() {
     fi
 
     # growpart extends the partition only when needed and updates the kernel
-    # partition table itself (partx --update). Then grow the filesystem.
-    # Stamp only when the whole chain succeeds, so failures retry next boot.
-    if growpart "$DISK" "$PART_NUM" >/dev/null 2>&1 \
-        && resize2fs "$ROOT_DEV" >/dev/null 2>&1; then
+    # partition table itself (partx --update). It exits non-zero with NOCHANGE
+    # when the partition already ends at the disk boundary; treat that as
+    # success and still write the stamp so equal-size test/DD images converge.
+    growpart_out=$(growpart "$DISK" "$PART_NUM" 2>&1)
+    growpart_rc=$?
+    if [ "$growpart_rc" -ne 0 ] \
+        && ! printf '%s\n' "$growpart_out" | grep -qi 'NOCHANGE'; then
+        eend 1
+        return 1
+    fi
+    if resize2fs "$ROOT_DEV" >/dev/null 2>&1; then
         [ -n "$DISK_SECTORS" ] && echo "$DISK_SECTORS" > "$STAMP"
+    else
+        eend 1
+        return 1
     fi
     eend 0
 }
