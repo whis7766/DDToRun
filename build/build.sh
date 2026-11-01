@@ -29,9 +29,9 @@ HEADLESS_SSH="${HEADLESS_SSH:-false}"
 # Headless SSH mode drops fbterm, CJK fonts, and the VGA kiosk takeover; the
 # app runs as a supervised background service and is accessed over SSH:3389.
 if [ "$HEADLESS_SSH" = "true" ]; then
-  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng busybox-extras openssh"
+  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras openssh"
 else
-  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng busybox-extras font-wqy-zenhei libstdc++"
+  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras font-wqy-zenhei libstdc++"
 fi
 if [ "${CGO_COMPAT:-false}" = "true" ]; then
   BASE_PACKAGES="$BASE_PACKAGES gcompat libc6-compat"

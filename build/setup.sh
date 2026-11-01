@@ -302,6 +302,7 @@ virtio_pci
 virtio_blk
 virtio_net
 e1000
+tun
 ext4
 jbd2
 mbcache
@@ -313,7 +314,7 @@ rm -rf /var/cache/apk/* /usr/share/doc /usr/share/man /usr/share/info 2>/dev/nul
 rm -rf /lib/firmware 2>/dev/null || true
 
 # Keep network driver modules (virtio_net, e1000) and their deps; delete the rest.
-KEEP_MODS="virtio_net virtio_pci virtio virtio_ring virtio_blk virtio_scsi net af_packet stp llc e1000 mii net_failover virtio-mmio tcp_bbr tcp_htcp tcp_cubic sch_fq scsi_mod sd_mod sr_mod cdrom libata ata_piix ahci libahci ata_generic pata_acpi ext4 mbcache jbd2 crc32c crc16"
+KEEP_MODS="virtio_net virtio_pci virtio virtio_ring virtio_blk virtio_scsi net af_packet stp llc e1000 mii net_failover virtio-mmio tun tcp_bbr tcp_htcp tcp_cubic sch_fq scsi_mod sd_mod sr_mod cdrom libata ata_piix ahci libahci ata_generic pata_acpi ext4 mbcache jbd2 crc32c crc16"
 find /lib/modules -name '*.ko*' | while read m; do
   keep=0
   for k in $KEEP_MODS; do
@@ -325,13 +326,21 @@ done
 depmod -a 2>/dev/null || true
 echo "==> kept network modules:"
 find /lib/modules -name '*.ko*' 2>/dev/null
-# Enable BBR for better network performance (write directly to /proc/sys).
+# Enable BBR/fq and basic TCP performance tuning (write directly to /proc/sys
+# to avoid sysctl service dependency on an unknown key).
 cat > /etc/local.d/10-bbr.start <<'EOF'
 #!/bin/sh
 modprobe tcp_bbr 2>/dev/null
 modprobe sch_fq 2>/dev/null
 echo fq > /proc/sys/net/core/default_qdisc 2>/dev/null
 echo bbr > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
+echo 16777216 > /proc/sys/net/core/rmem_max 2>/dev/null
+echo 16777216 > /proc/sys/net/core/wmem_max 2>/dev/null
+printf '4096 87380 16777216\n' > /proc/sys/net/ipv4/tcp_rmem 2>/dev/null
+printf '4096 65536 16777216\n' > /proc/sys/net/ipv4/tcp_wmem 2>/dev/null
+echo 3 > /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null
+echo 1 > /proc/sys/net/ipv4/tcp_mtu_probing 2>/dev/null
+echo 1 > /proc/sys/net/ipv4/tcp_sack 2>/dev/null
 EOF
 chmod +x /etc/local.d/10-bbr.start
 
