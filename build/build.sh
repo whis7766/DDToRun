@@ -30,11 +30,11 @@ CJK_TTY="${CJK_TTY:-true}"
 # Headless SSH mode drops fbterm, CJK fonts, and the VGA kiosk takeover; the
 # app runs as a supervised background service and is accessed over SSH:3389.
 if [ "$HEADLESS_SSH" = "true" ]; then
-  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras openssh"
+  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd openssh"
 elif [ "$CJK_TTY" != "false" ]; then
-  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras font-wqy-zenhei fontconfig freetype ncurses libstdc++"
+  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd font-wqy-zenhei fontconfig freetype ncurses libstdc++"
 else
-  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras"
+  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd"
 fi
 if [ "${CGO_COMPAT:-false}" = "true" ]; then
   BASE_PACKAGES="$BASE_PACKAGES gcompat libc6-compat"
@@ -147,11 +147,14 @@ rmdir "$MNT_DIR" 2>/dev/null || true
 dd if="$MBR_TMP" of="$LOOP_DEV" bs=440 count=1 conv=notrunc status=none
 rm -f "$MBR_TMP"
 
-# Use the official ext4 layout. Reserve no blocks for root-only userspace and
-# zero free blocks before release compression; journaling remains enabled for
+# Official ext4 layout from alpine-make-vm-image already disables the 64bit
+# feature (required by syslinux) and uses nodiscard at mkfs time. On top of
+# that, use mature e2fsprogs tuning only: no reserved blocks, disable periodic
+# fsck counters, compact directory indexes, replay/verify the journal, then
+# zero free blocks for maximum zstd compression. Journaling stays enabled for
 # safe power loss on real VPS hosts.
-tune2fs -m 0 "$PART_DEV" >/dev/null 2>&1 || true
-e2fsck -fy "$PART_DEV" >/dev/null 2>&1 || true
+tune2fs -m 0 -c 0 -i 0 "$PART_DEV" >/dev/null 2>&1 || true
+e2fsck -fyD "$PART_DEV" >/dev/null 2>&1 || { rc=$?; [ "$rc" -eq 1 ] || { echo "e2fsck failed with code $rc"; exit 1; }; }
 zerofree "$PART_DEV" >/dev/null 2>&1 || true
 
 file "$IMG"
