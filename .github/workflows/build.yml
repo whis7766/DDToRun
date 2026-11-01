@@ -79,7 +79,7 @@ jobs:
           sudo chown -R "$(id -un):$(id -gn)" .
           RAW="vps-app-runner.img.raw"
           ZST="vpsapp"
-          zstd -q -22 --ultra --long=27 --single-thread -f "$RAW" -o "$ZST"
+          zstd -q -22 --ultra --long=27 -f "$RAW" -o "$ZST"
 
       - name: QEMU boot test
         env:
