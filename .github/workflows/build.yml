@@ -189,8 +189,10 @@ jobs:
           echo "PASS: root auto-grow completed"
 
           echo "=== ext4 journal feature ==="
-          sudo tune2fs -l guest-root | grep -E "Filesystem features|Block count|Free blocks" || true
-          if sudo tune2fs -l guest-root | grep -qw has_journal; then
+          FS_SRC="$(findmnt -no SOURCE guest-root)"
+          echo "filesystem source: $FS_SRC"
+          sudo tune2fs -l "$FS_SRC" | grep -E "Filesystem features|Block count|Free blocks" || true
+          if sudo tune2fs -l "$FS_SRC" | grep -qw has_journal; then
             echo "FAIL: ext4 journal still enabled"; sudo umount guest-root; exit 1
           fi
           echo "PASS: ext4 journal disabled"
