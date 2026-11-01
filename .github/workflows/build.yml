@@ -101,6 +101,12 @@ jobs:
           echo "=== end diagnostics ==="
           cd "$GITHUB_WORKSPACE/dist"
           zstd -d -f vpsapp -o test.img
+          # Redirect kernel/OpenRC output to the serial file for automated checks.
+          mkdir -p guest-edit
+          sudo mount -o loop,offset=1048576 test.img guest-edit
+          sudo sed -i 's|APPEND|APPEND console=ttyS0|' guest-edit/boot/extlinux.conf
+          sudo cat guest-edit/boot/extlinux.conf
+          sudo umount guest-edit
           echo "Starting QEMU..."
           qemu-system-x86_64 \
             -enable-kvm \
