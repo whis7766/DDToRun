@@ -5,6 +5,7 @@
 set -e
 APP_URL="${APP_URL:-}"
 HEADLESS_SSH="${HEADLESS_SSH:-false}"
+CJK_TTY="${CJK_TTY:-true}"
 
 echo "==> system config: hostname / network"
 setup-hostname vps-app
@@ -179,7 +180,7 @@ if [ -n "$APP_URL" ]; then
     # --- compile fbterm natively (musl) for Chinese on the VGA console ----
     # Alpine ships no fbterm package; build from upstream source in the chroot
     # with the official toolchain, then drop the dev packages again.
-    if [ "$HEADLESS_SSH" != "true" ] && [ -f /mnt/vendor/fbterm-src.tar.gz ]; then
+    if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ] && [ -f /mnt/vendor/fbterm-src.tar.gz ]; then
         echo "==> compiling fbterm from source (Alpine native, CJK support)"
         apk add --no-cache build-base fontconfig-dev freetype-dev linux-headers ncurses >/dev/null 2>&1 || true
         cd /tmp
@@ -220,8 +221,10 @@ if [ -n "$APP_URL" ]; then
             echo "$missing"; exit 1
         fi
         echo "fbterm ready: $(fbterm --version 2>&1 | head -1)"
-    elif [ "$HEADLESS_SSH" != "true" ]; then
-        echo "WARNING: fbterm source missing - VGA Chinese display degraded"
+    elif [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
+        echo "WARNING: fbterm source missing - VGA display degraded"
+    else
+        echo "CJK tty disabled: using plain VGA tty"
     fi
     # Bake the download URL into the image so the Go launcher (which has no
     # shell wrapper injecting env) can read it at runtime.
@@ -344,7 +347,7 @@ echo 1 > /proc/sys/net/ipv4/tcp_sack 2>/dev/null
 EOF
 chmod +x /etc/local.d/10-bbr.start
 
-if [ "$HEADLESS_SSH" != "true" ]; then
+if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
     # Keep only the CJK font; remove other fonts to save space.
     find /usr/share/fonts -type f ! -iname 'wqy*' -delete 2>/dev/null || true
 else

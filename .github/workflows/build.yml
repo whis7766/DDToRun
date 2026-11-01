@@ -31,6 +31,11 @@ on:
         required: true
         default: false
         type: boolean
+      cjk_tty:
+        description: "Enable fbterm + CJK font on the VGA tty1 console (default enabled; disable for a smaller ASCII-only image)."
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -70,6 +75,7 @@ jobs:
           ALPINE_BRANCH: "${{ github.event.inputs.alpine_branch }}"
           CGO_COMPAT: "${{ github.event.inputs.cgo_compat }}"
           HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
+          CJK_TTY: "${{ github.event.inputs.cjk_tty }}"
         run: |
           sudo -E bash build/build.sh
 
