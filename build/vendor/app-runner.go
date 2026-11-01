@@ -33,11 +33,8 @@ const (
 	stallTimeout = 30 * time.Second
 )
 
-func line() { fmt.Println("====================================================") }
-func banner(msg string) {
-	line()
-	fmt.Println("  " + msg)
-	line()
+func status(format string, args ...any) {
+	fmt.Printf("[app-runner] "+format+"\n", args...)
 }
 
 func haveApp() bool {
@@ -92,7 +89,7 @@ func fetch() bool {
 		log.Printf("fetch attempt %d/%d: %s", attempt, maxRetry, url)
 		if err := downloadOnce(url); err != nil {
 			log.Printf("download failed: %v", err)
-			banner(fmt.Sprintf("更新下载失败 (尝试 %d/%d): %v", attempt, maxRetry, err))
+			status("download failed (%d/%d): %v", attempt, maxRetry, err)
 			time.Sleep(3 * time.Second)
 			continue
 		}
@@ -103,14 +100,14 @@ func fetch() bool {
 		os.Chmod(appPath, 0755)
 		fi, _ := os.Stat(appPath)
 		log.Printf("downloaded new version (%d bytes)", fi.Size())
-		banner(fmt.Sprintf("更新成功: 新版本 %d 字节", fi.Size()))
+		status("downloaded new version: %d bytes", fi.Size())
 		return true
 	}
 	os.Remove(tmpPath)
 	if haveApp() {
-		banner("继续使用上一版本")
+		status("using existing local app")
 	} else {
-		banner("尚未有可用业务程序")
+		status("no local app available")
 	}
 	return false
 }
@@ -244,8 +241,8 @@ func downloadParallel(client *http.Client, f *os.File, url string, total int64) 
 				speed := float64(d-old) / now.Sub(lastTime).Seconds() / 1048576.0
 				lastTime = now
 				if total > 0 {
-					fmt.Printf("\r  下载中: %3d%%  %5.1f/%5.1f MB  %4.1f MB/s  %d线程   ",
-						d*100/total, float64(d)/1048576.0, float64(total)/1048576.0, speed, numWorkers)
+					fmt.Printf("\r[app-runner] download %3d%% %5.1f/%5.1fMB %4.1fMB/s ",
+						d*100/total, float64(d)/1048576.0, float64(total)/1048576.0, speed)
 				}
 			case <-done:
 				return
@@ -358,10 +355,10 @@ func (p *progressWriter) Run(done <-chan struct{}) {
 			d := p.read.Load()
 			speed := float64(d-oldBytes) / dt / 1048576.0
 			if p.total > 0 {
-				fmt.Printf("\r  下载中: %3d%%  %5.1f/%5.1f MB  %4.1f MB/s   ",
+				fmt.Printf("\r[app-runner] download %3d%% %5.1f/%5.1fMB %4.1fMB/s ",
 					d*100/p.total, float64(d)/1048576.0, float64(p.total)/1048576.0, speed)
 			} else {
-				fmt.Printf("\r  下载中: %5.1f MB  %4.1f MB/s   ", float64(d)/1048576.0, speed)
+				fmt.Printf("\r[app-runner] download %5.1fMB %4.1fMB/s ", float64(d)/1048576.0, speed)
 			}
 		case <-done:
 			return
@@ -398,14 +395,14 @@ func main() {
 		}
 	}
 	log.SetOutput(openLog())
-	log.Println("app-runner (Go) starting")
+	log.Println("app-runner starting")
 	for {
 		fetch()
 		if haveApp() {
 			log.Println("running", appPath)
 			if err := execApp(); err != nil {
 				log.Printf("exec failed: %v - restarting local copy in 2s", err)
-				banner("无法启动业务程序: " + err.Error())
+				status("exec failed: %v", err)
 			}
 		} else {
 			log.Println("no app available - retry download in 2s")

@@ -291,8 +291,13 @@ cat > /etc/modules <<'EOF'
 virtio
 virtio_ring
 virtio_pci
+virtio_blk
 virtio_net
 e1000
+ext4
+jbd2
+mbcache
+sch_fq
 EOF
 rm -rf /var/cache/apk/* /usr/share/doc /usr/share/man /usr/share/info 2>/dev/null || true
 
@@ -300,7 +305,7 @@ rm -rf /var/cache/apk/* /usr/share/doc /usr/share/man /usr/share/info 2>/dev/nul
 rm -rf /lib/firmware 2>/dev/null || true
 
 # Keep network driver modules (virtio_net, e1000) and their deps; delete the rest.
-KEEP_MODS="virtio_net virtio_pci virtio virtio_ring net af_packet stp llc e1000 mii net_failover virtio-mmio tcp_bbr tcp_htcp tcp_cubic sch_fq"
+KEEP_MODS="virtio_net virtio_pci virtio virtio_ring virtio_blk virtio_scsi net af_packet stp llc e1000 mii net_failover virtio-mmio tcp_bbr tcp_htcp tcp_cubic sch_fq scsi_mod sd_mod sr_mod cdrom libata ata_piix ahci libahci ata_generic pata_acpi ext4 mbcache jbd2 crc32c crc16"
 find /lib/modules -name '*.ko*' | while read m; do
   keep=0
   for k in $KEEP_MODS; do
