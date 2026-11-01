@@ -195,9 +195,9 @@ if [ -n "$APP_URL" ]; then
         tar xzf /mnt/vendor/fbterm-src.tar.gz 2>/dev/null
         FBTERM_DIR="$(find /tmp -maxdepth 1 -type d -name 'fbterm-*' | head -1)"
         [ -n "$FBTERM_DIR" ] || { echo "fbterm source did not extract to a fbterm-* directory"; exit 1; }
-        # musl does not define WAIT_ANY; pass it through CXXFLAGS instead of
-        # editing upstream source. Disable optional subsystems not needed here.
-        FB_CXXFLAGS="-DWAIT_ANY=((pid_t)-1) -Wno-narrowing"
+        # musl does not define WAIT_ANY; pass the conventional value -1 without
+        # parentheses so GNU make does not expose shell metacharacters in recipes.
+        FB_CXXFLAGS="-DWAIT_ANY=-1 -Wno-narrowing"
         if ( cd "$FBTERM_DIR" \
              && CXXFLAGS="$FB_CXXFLAGS" ./configure --prefix=/usr --disable-gpm --disable-vesa --disable-signalfd >/tmp/fbterm-build.log 2>&1 \
              && make -j"$(nproc)" CXXFLAGS="$FB_CXXFLAGS" >>/tmp/fbterm-build.log 2>&1 \
