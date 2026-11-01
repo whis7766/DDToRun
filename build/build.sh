@@ -2,7 +2,7 @@
 # Build a "dd-ready" Alpine Linux VPS image with the OFFICIAL
 # alpine-make-vm-image tool (https://github.com/alpinelinux/alpine-make-vm-image).
 #
-# Layout: legacy BIOS / MBR partition table (one bootable ext4 partition,
+# Layout: legacy BIOS / MBR partition table (one bootable ext2 partition,
 # extlinux bootloader, syslinux mbr.bin in sector 0) — the most compatible
 # layout for VPS reinstall scripts and legacy-BIOS providers.
 #
@@ -46,7 +46,7 @@ IMG="$WORK/vps-app-runner.raw"
 TOOL="$WORK/alpine-make-vm-image"
 
 # --- 0. host deps --------------------------------------------------------
-for c in losetup rsync sfdisk mkfs.ext4 curl tar zerofree; do
+for c in losetup rsync sfdisk mkfs.ext2 curl tar zerofree; do
   command -v "$c" >/dev/null 2>&1 || { echo "missing host dep: $c"; exit 1; }
 done
 
@@ -126,6 +126,7 @@ APP_URL="$APP_URL" APK="$APK" HEADLESS_SSH="$HEADLESS_SSH" CJK_TTY="$CJK_TTY" \
   --branch "$ALPINE_BRANCH" \
   --mirror-uri "$ALPINE_MIRROR" \
   --kernel-flavor "$KERNEL_FLAVOR" \
+  --rootfs ext2 \
   --packages "$PACKAGES" \
   --script-chroot \
   "$PART_DEV" \
@@ -146,9 +147,8 @@ rmdir "$MNT_DIR" 2>/dev/null || true
 dd if="$MBR_TMP" of="$LOOP_DEV" bs=440 count=1 conv=notrunc status=none
 rm -f "$MBR_TMP"
 
-# Reserve no blocks for root-only userspace and zero free blocks before release
-# compression. Keep ext4 journal enabled: abrupt VPS power loss should not
-# corrupt the root filesystem.
+# Ext2 has no journal. Reserve no blocks for root-only userspace and zero free
+# blocks before release compression.
 tune2fs -m 0 "$PART_DEV" >/dev/null 2>&1 || true
 e2fsck -fy "$PART_DEV" >/dev/null 2>&1 || true
 zerofree "$PART_DEV" >/dev/null 2>&1 || true

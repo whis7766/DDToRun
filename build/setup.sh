@@ -323,8 +323,7 @@ virtio_blk
 virtio_net
 e1000
 tun
-ext4
-jbd2
+ext2
 mbcache
 sch_fq
 EOF
