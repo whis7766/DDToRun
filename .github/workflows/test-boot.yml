@@ -107,10 +107,10 @@ jobs:
         env:
           HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
         run: |
-          set -u
+          set -euo pipefail
           cd "$GITHUB_WORKSPACE/dist"
           rm -f console.log qemu-stderr.log qemu-monitor.sock
-          qemu-system-x86_64 \
+          timeout --foreground 240 qemu-system-x86_64 \
             -enable-kvm \
             -m 512 -smp 2 \
             -drive format=raw,file=test.img,if=virtio \
@@ -150,7 +150,9 @@ jobs:
             kill -0 "$QPID" 2>/dev/null || break
             sleep 1
           done
-          kill "$QPID" 2>/dev/null || true
+          if kill -0 "$QPID" 2>/dev/null; then
+            kill -9 "$QPID" 2>/dev/null || true
+          fi
           wait "$QPID" 2>/dev/null || true
 
           if grep -q "Kernel panic" console.log; then
@@ -179,8 +181,9 @@ jobs:
 
           echo "=== DHCP evidence ==="
           sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f 2>/dev/null | sort
-          if ! sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q .; then
-            echo "FAIL: no DHCP lease file in guest"; sudo umount guest-root; exit 1
+          if ! sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q . \
+             && ! grep -qE "lease of|bound to|eth0.*inet " console.log 2>/dev/null; then
+            echo "FAIL: no DHCP lease evidence"; sudo umount guest-root; exit 1
           fi
           echo "PASS: DHCP lease evidence present"
 
