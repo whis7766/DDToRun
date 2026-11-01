@@ -20,18 +20,15 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
           p = Path('reinstall.sh')
           s = p.read_text()
-          old = """    setos_dd() {
-              # raw 包含 vhd
-              test_url $img 'raw raw.gzip raw.xz raw.zstd raw.tar.gzip raw.tar.xz raw.tar.zstd' img_type
-          """
-          new = old + """              echo "REINSTALL_TYPE_OK=$img_type"
-              exit 0
-          """
-          if old not in s:
-              raise SystemExit('setos_dd detection block not found')
-          p.write_text(s.replace(old, new))
+          pattern = r"(^[ \t]*test_url \$img 'raw raw\.gzip raw\.xz raw\.zstd raw\.tar\.gzip raw\.tar\.xz raw\.tar\.zstd' img_type$)"
+          repl = r"\1\n" + "              echo \"REINSTALL_TYPE_OK=$img_type\"\n              exit 0\n"
+          s2, n = re.subn(pattern, repl, s, flags=re.M)
+          if n != 1:
+              raise SystemExit(f'expected one detection line, patched {n}')
+          p.write_text(s2)
           PY
 
       - name: Run reinstall.sh DD image detection
