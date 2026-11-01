@@ -186,9 +186,10 @@ if [ -n "$APP_URL" ]; then
         echo "ERROR: fbterm source required for CJK tty but missing"; exit 1
     else
         echo "==> building fbterm from upstream source using its autotools guide"
-        # Build dependencies from configure.ac: C/C++ toolchain, pkg-config,
-        # freetype2/fontconfig headers, kernel headers, and ncurses for tic.
-        apk add --no-cache build-base pkgconf fontconfig-dev freetype-dev linux-headers ncurses >/dev/null 2>&1 || true
+        # Community-standard Alpine pattern: group temporary build packages in a
+        # virtual world group, then remove the group and unused dependencies.
+        apk add --no-cache --virtual .fbterm-build-deps \
+            build-base pkgconf fontconfig-dev freetype-dev linux-headers >/dev/null 2>&1 || true
         cd /tmp
         rm -rf /tmp/fbterm-*
         tar xzf /mnt/vendor/fbterm-src.tar.gz 2>/dev/null
@@ -208,7 +209,9 @@ if [ -n "$APP_URL" ]; then
         fi
         cd / && rm -rf /tmp/fbterm-*
         strip /usr/bin/fbterm 2>/dev/null || true
-        apk del build-base pkgconf fontconfig-dev freetype-dev linux-headers >/dev/null 2>&1 || true
+        apk del .fbterm-build-deps >/dev/null 2>&1 || true
+        apk cache clean >/dev/null 2>&1 || true
+        rm -f /tmp/fbterm-build.log
         FB_BIN="$(command -v fbterm 2>/dev/null || true)"
         if [ -z "$FB_BIN" ]; then
             echo "fbterm build did not produce a binary"; exit 1
