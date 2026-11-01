@@ -179,6 +179,13 @@ jobs:
           fi
           echo "PASS: grow-root service completed"
 
+          echo "=== ext4 journal feature ==="
+          sudo tune2fs -l guest-root | grep -E "Filesystem features|Block count|Free blocks" || true
+          if sudo tune2fs -l guest-root | grep -qw has_journal; then
+            echo "FAIL: ext4 journal still enabled"; sudo umount guest-root; exit 1
+          fi
+          echo "PASS: ext4 journal disabled"
+
           echo "=== DHCP evidence ==="
           sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f 2>/dev/null | sort || true
           dhcp_ok=0
