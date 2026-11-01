@@ -34,7 +34,7 @@ jobs:
       - name: Run reinstall.sh DD image detection
         run: |
           set -o pipefail
-          bash reinstall.sh dd \
+          sudo -E bash reinstall.sh dd \
             --username test \
             --password test \
             --img '${{ inputs.image_url }}' 2>&1 | tee reinstall.log
