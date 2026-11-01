@@ -148,12 +148,14 @@ dd if="$MBR_TMP" of="$LOOP_DEV" bs=440 count=1 conv=notrunc status=none
 rm -f "$MBR_TMP"
 
 # Official ext4 layout from alpine-make-vm-image already disables the 64bit
-# feature (required by syslinux) and uses nodiscard at mkfs time. On top of
-# that, use mature e2fsprogs tuning only: no reserved blocks, disable periodic
-# fsck counters, compact directory indexes, replay/verify the journal, then
-# zero free blocks for maximum zstd compression. Journaling stays enabled for
-# safe power loss on real VPS hosts.
+# feature (required by syslinux) and uses nodiscard at mkfs time. This appliance
+# runs on always-on VPS hosts, so keep the mature ext4 driver/metadata but remove
+# the 16MiB journal with the standard e2fsprogs toggle. Disable reserved blocks
+# and periodic fsck counters, compact directory indexes, then zero free blocks
+# for maximum zstd compression.
 tune2fs -m 0 -c 0 -i 0 "$PART_DEV" >/dev/null 2>&1 || true
+e2fsck -fyD "$PART_DEV" >/dev/null 2>&1 || { rc=$?; [ "$rc" -eq 1 ] || { echo "e2fsck failed with code $rc"; exit 1; }; }
+tune2fs -O ^has_journal "$PART_DEV" >/dev/null || { echo "failed to disable ext4 journal"; exit 1; }
 e2fsck -fyD "$PART_DEV" >/dev/null 2>&1 || { rc=$?; [ "$rc" -eq 1 ] || { echo "e2fsck failed with code $rc"; exit 1; }; }
 zerofree "$PART_DEV" >/dev/null 2>&1 || true
 
