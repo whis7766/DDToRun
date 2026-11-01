@@ -252,6 +252,9 @@ pidfile=/run/app-runner.pid
 output_log=/dev/null
 error_log=/dev/null
 depend() { need net; after time-sync sshd; }
+pre_start() {
+    pkill -f '^/opt/business-app' 2>/dev/null || true
+}
 EOF
         cat > /etc/conf.d/app-runner <<'EOF'
 respawn=respawn
@@ -266,6 +269,11 @@ EOF
 #!/bin/sh
 # Force IPv4 DNS before Go starts (DHCP may have handed out unreachable IPv6).
 printf 'nameserver 119.29.29.29\nnameserver 223.5.5.5\n' > /etc/resolv.conf 2>/dev/null
+# Clear any stale business process and reset the TTY before the app takes over.
+pkill -f '^/opt/business-app' 2>/dev/null || true
+stty sane 2>/dev/null || true
+printf '\033c' 2>/dev/null || true
+printf '\033[2J\033[H' 2>/dev/null || true
 FBTERM="$(command -v fbterm || true)"
 # Prefer the CJK font (wqy-zenhei) if present; fall back to any TTF/TTC/OTF.
 FONT="$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)"
