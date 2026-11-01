@@ -146,9 +146,9 @@ rmdir "$MNT_DIR" 2>/dev/null || true
 dd if="$MBR_TMP" of="$LOOP_DEV" bs=440 count=1 conv=notrunc status=none
 rm -f "$MBR_TMP"
 
-# Remove journal and reserved blocks (build-once appliance, no need for
-# root reserve or crash recovery). Then fsck and zero free blocks.
-tune2fs -O ^has_journal "$PART_DEV" >/dev/null 2>&1 || true
+# Reserve no blocks for root-only userspace and zero free blocks before release
+# compression. Keep ext4 journal enabled: abrupt VPS power loss should not
+# corrupt the root filesystem.
 tune2fs -m 0 "$PART_DEV" >/dev/null 2>&1 || true
 e2fsck -fy "$PART_DEV" >/dev/null 2>&1 || true
 zerofree "$PART_DEV" >/dev/null 2>&1 || true
