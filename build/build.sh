@@ -25,11 +25,14 @@ IMAGE_SIZE_GB="${IMAGE_SIZE_GB:-1}"
 ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 ALPINE_BRANCH="${ALPINE_BRANCH:-v3.22}"
 KERNEL_FLAVOR="${KERNEL_FLAVOR:-virt}"
-# Performance-first: default to pure-static Go (CGO_ENABLED=0) which needs no
-# libc compat layer. libstdc++ is always kept because fbterm links C++ runtime
-# symbols. Only when CGO_COMPAT=true do we add gcompat/libc6-compat so
-# dynamically-linked CGO/glibc binaries can run.
-BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng busybox-extras font-wqy-zenhei libstdc++"
+HEADLESS_SSH="${HEADLESS_SSH:-false}"
+# Headless SSH mode drops fbterm, CJK fonts, and the VGA kiosk takeover; the
+# app runs as a supervised background service and is accessed over SSH:3389.
+if [ "$HEADLESS_SSH" = "true" ]; then
+  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng busybox-extras openssh"
+else
+  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng busybox-extras font-wqy-zenhei libstdc++"
+fi
 if [ "${CGO_COMPAT:-false}" = "true" ]; then
   BASE_PACKAGES="$BASE_PACKAGES gcompat libc6-compat"
 fi
@@ -77,14 +80,18 @@ export APK="$APK_STATIC"
 # Alpine ships no fbterm package; setup.sh compiles it natively in the chroot.
 # We fetch the upstream 1.7 release tarball here (not committed; gitignored) so
 # the chroot step can find it at /mnt/vendor/fbterm-src.tar.gz.
-echo "==> [3/6] provision fbterm source"
-VENDOR_FBTERM="$SCRIPT_DIR/vendor/fbterm-src.tar.gz"
-if [ -s "$VENDOR_FBTERM" ]; then
-  echo "  using cached $VENDOR_FBTERM"
+if [ "$HEADLESS_SSH" != "true" ]; then
+  echo "==> [3/6] provision fbterm source"
+  VENDOR_FBTERM="$SCRIPT_DIR/vendor/fbterm-src.tar.gz"
+  if [ -s "$VENDOR_FBTERM" ]; then
+    echo "  using cached $VENDOR_FBTERM"
+  else
+    curl -fSL --retry 5 --retry-all-errors --connect-timeout 30 \
+      -o "$VENDOR_FBTERM" \
+      https://deb.debian.org/debian/pool/main/f/fbterm/fbterm_1.7.orig.tar.gz
+  fi
 else
-  curl -fSL --retry 5 --retry-all-errors --connect-timeout 30 \
-    -o "$VENDOR_FBTERM" \
-    https://deb.debian.org/debian/pool/main/f/fbterm/fbterm_1.7.orig.tar.gz
+  echo "==> [3/6] headless SSH mode: skip fbterm source"
 fi
 
 # --- 4. create raw image + MBR partition table ----------------------------
@@ -111,7 +118,7 @@ trap cleanup_loop EXIT
 echo "==> [5/6] build on $PART_DEV (kernel=${KERNEL_FLAVOR}, branch=${ALPINE_BRANCH})"
 # NOTE: --script-chroot is a boolean flag; the setup script is a positional
 # arg: alpine-make-vm-image [options] <image> [<script>]
-APP_URL="$APP_URL" APK="$APK" \
+APP_URL="$APP_URL" APK="$APK" HEADLESS_SSH="$HEADLESS_SSH" \
   "$TOOL" \
   --branch "$ALPINE_BRANCH" \
   --mirror-uri "$ALPINE_MIRROR" \

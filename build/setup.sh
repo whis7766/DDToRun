@@ -4,6 +4,7 @@
 # bind-mounted at /mnt, the chroot root is the image itself).
 set -e
 APP_URL="${APP_URL:-}"
+HEADLESS_SSH="${HEADLESS_SSH:-false}"
 
 echo "==> system config: hostname / network"
 setup-hostname vps-app
@@ -55,8 +56,13 @@ rc-update del hwdrivers sysinit >/dev/null 2>&1 || true
 # Keep sysctl boot: we need it to apply disable_ipv6.
 rc-update del dmesg sysinit >/dev/null 2>&1 || true
 
-# Only tty1 runs the app (kiosk); drop the other gettys.
-sed -i 's|^tty[2-6]::respawn:.*|#&|' /etc/inittab
+if [ "$HEADLESS_SSH" = "true" ]; then
+    # Headless: no VGA console login; access the box over SSH only.
+    sed -i 's|^#\?tty[1-6]::respawn:.*|#&|' /etc/inittab
+else
+    # Kiosk: only tty1 runs the app; drop the other gettys.
+    sed -i 's|^tty[2-6]::respawn:.*|#&|' /etc/inittab
+fi
 
 # --- grow root fs to fill the whole disk on boot -------------------------
 # MBR layout: root is on the first partition (/dev/vda1). Resolve the real
@@ -125,9 +131,9 @@ chmod +x /etc/init.d/time-sync
 rc-update add time-sync boot
 
 # --- SSH remote access (sshd on port 3389, key-only) ---------------------
-# Host keys are baked in from /mnt/vendor/ so the host fingerprint is stable
-# across rebuilds (user can pin it in known_hosts). Root login is key-only.
-apk add --no-cache openssh >/dev/null 2>&1
+# Headless builds only. Host keys are baked in from /mnt/vendor/ so the host
+# fingerprint stays stable; root login is key-only.
+if [ "$HEADLESS_SSH" = "true" ]; then
 install -d -m 0700 /etc/ssh /root/.ssh
 # Bake fixed host keys
 if [ -f /mnt/vendor/ssh_host_ed25519_key ]; then
@@ -158,6 +164,7 @@ EOF
 # Clear any host keys openssh might have generated on first install; we want ours.
 rm -f /etc/ssh/ssh_rsa_key* /etc/ssh/ssh_ecdsa_key* /etc/ssh/ssh_dsa_key* 2>/dev/null || true
 rc-update add sshd default
+fi
 
 # --- single-app mode: business binary on the VGA console (tty1) ----------
 # The image is a single-purpose appliance. On boot the business binary takes
@@ -171,7 +178,7 @@ if [ -n "$APP_URL" ]; then
     # --- compile fbterm natively (musl) for Chinese on the VGA console ----
     # Alpine ships no fbterm package; build from upstream source in the chroot
     # with the official toolchain, then drop the dev packages again.
-    if [ -f /mnt/vendor/fbterm-src.tar.gz ]; then
+    if [ "$HEADLESS_SSH" != "true" ] && [ -f /mnt/vendor/fbterm-src.tar.gz ]; then
         echo "==> compiling fbterm from source (Alpine native, CJK support)"
         apk add --no-cache build-base fontconfig-dev freetype-dev linux-headers ncurses >/dev/null 2>&1 || true
         cd /tmp
@@ -212,7 +219,7 @@ if [ -n "$APP_URL" ]; then
             echo "$missing"; exit 1
         fi
         echo "fbterm ready: $(fbterm --version 2>&1 | head -1)"
-    else
+    elif [ "$HEADLESS_SSH" != "true" ]; then
         echo "WARNING: fbterm source missing - VGA Chinese display degraded"
     fi
     # Bake the download URL into the image so the Go launcher (which has no
@@ -232,9 +239,29 @@ if [ -n "$APP_URL" ]; then
     else
         echo "ERROR: /mnt/vendor/app-runner missing (host build step failed)"; exit 1
     fi
-    # CJK-aware launcher: fbterm (framebuffer terminal) + CJK font for Chinese;
-    # fall back to the plain VGA tty when no framebuffer / font / fbterm.
-    cat > /usr/local/sbin/app-runner-fb.sh <<'EOF'
+    if [ "$HEADLESS_SSH" = "true" ]; then
+        # Headless: supervised background service; output goes to its own log.
+        cat > /etc/init.d/app-runner <<'EOF'
+#!/sbin/openrc-run
+description="Download and run the business application"
+supervisor=supervise-daemon
+command=/usr/local/sbin/app-runner
+command_user=root
+pidfile=/run/app-runner.pid
+output_log=/dev/null
+error_log=/dev/null
+depend() { need net; after time-sync sshd; }
+EOF
+        cat > /etc/conf.d/app-runner <<'EOF'
+respawn=respawn
+respawn_delay=2
+EOF
+        chmod +x /etc/init.d/app-runner
+        rc-update add app-runner default
+    else
+        # CJK-aware launcher: fbterm (framebuffer terminal) + CJK font for Chinese;
+        # fall back to the plain VGA tty when no framebuffer / font / fbterm.
+        cat > /usr/local/sbin/app-runner-fb.sh <<'EOF'
 #!/bin/sh
 # Force IPv4 DNS before Go starts (DHCP may have handed out unreachable IPv6).
 printf 'nameserver 119.29.29.29\nnameserver 223.5.5.5\n' > /etc/resolv.conf 2>/dev/null
@@ -250,10 +277,11 @@ else
     sh -c "$RUN"
 fi
 EOF
-    chmod +x /usr/local/sbin/app-runner-fb.sh
-    # take over VGA tty1 (replace getty with the app loop) - standard init
-    sed -i 's|^#\?tty1::respawn:.*|tty1::respawn:/usr/local/sbin/app-runner-fb.sh|' /etc/inittab
-    grep -q '^tty1::respawn:' /etc/inittab || echo 'tty1::respawn:/usr/local/sbin/app-runner-fb.sh' >> /etc/inittab
+        chmod +x /usr/local/sbin/app-runner-fb.sh
+        # take over VGA tty1 (replace getty with the app loop) - standard init
+        sed -i 's|^#\?tty1::respawn:.*|tty1::respawn:/usr/local/sbin/app-runner-fb.sh|' /etc/inittab
+        grep -q '^tty1::respawn:' /etc/inittab || echo 'tty1::respawn:/usr/local/sbin/app-runner-fb.sh' >> /etc/inittab
+    fi
 fi
 
 # --- image size cleanup --------------------------------------------------
@@ -293,8 +321,12 @@ echo bbr > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null
 EOF
 chmod +x /etc/local.d/10-bbr.start
 
-# Keep only the CJK font; remove other fonts to save space.
-find /usr/share/fonts -type f ! -iname 'wqy*' -delete 2>/dev/null || true
+if [ "$HEADLESS_SSH" != "true" ]; then
+    # Keep only the CJK font; remove other fonts to save space.
+    find /usr/share/fonts -type f ! -iname 'wqy*' -delete 2>/dev/null || true
+else
+    rm -rf /usr/share/fonts 2>/dev/null || true
+fi
 
 # Remove locale/i18n data.
 rm -rf /usr/share/locale /usr/share/i18n 2>/dev/null || true
