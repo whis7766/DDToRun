@@ -150,6 +150,7 @@ Port 3389
 ListenAddress 0.0.0.0
 PermitRootLogin prohibit-password
 PasswordAuthentication no
+KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys
 PermitEmptyPasswords no
@@ -272,9 +273,9 @@ FONT="$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)"
 # Mirror stdout/stderr to a log file so SSH sessions can `tail -f` it.
 RUN="exec /usr/local/sbin/app-runner 2>&1 | tee -a /var/log/app-runner.log"
 if [ -c /dev/fb0 ] && [ -n "$FONT" ] && [ -n "$FBTERM" ]; then
-    exec "$FBTERM" -f "$FONT" -s 22 -- sh -c "$RUN"
+    APP_RUNNER_LOG_STDOUT_ONLY=1 exec "$FBTERM" -f "$FONT" -s 22 -- sh -c "$RUN"
 else
-    sh -c "$RUN"
+    APP_RUNNER_LOG_STDOUT_ONLY=1 sh -c "$RUN"
 fi
 EOF
         chmod +x /usr/local/sbin/app-runner-fb.sh
@@ -299,7 +300,7 @@ rm -rf /var/cache/apk/* /usr/share/doc /usr/share/man /usr/share/info 2>/dev/nul
 rm -rf /lib/firmware 2>/dev/null || true
 
 # Keep network driver modules (virtio_net, e1000) and their deps; delete the rest.
-KEEP_MODS="virtio_net virtio_pci virtio virtio_ring net af_packet stp llc e1000 mii net_failover virtio-mmio tcp_bbr tcp_htcp tcp_cubic"
+KEEP_MODS="virtio_net virtio_pci virtio virtio_ring net af_packet stp llc e1000 mii net_failover virtio-mmio tcp_bbr tcp_htcp tcp_cubic sch_fq"
 find /lib/modules -name '*.ko*' | while read m; do
   keep=0
   for k in $KEEP_MODS; do

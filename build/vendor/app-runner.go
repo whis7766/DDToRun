@@ -185,7 +185,13 @@ func downloadSingle(client *http.Client, f *os.File, url string) error {
 	_, err = io.CopyBuffer(f, io.TeeReader(stallRd, pw), make([]byte, 1<<20))
 	close(progressDone)
 	fmt.Println()
-	return err
+	if err != nil {
+		return err
+	}
+	if fi, statErr := f.Stat(); statErr == nil && resp.ContentLength > 0 && fi.Size() != resp.ContentLength {
+		return fmt.Errorf("size mismatch after download: got %d want %d", fi.Size(), resp.ContentLength)
+	}
+	return nil
 }
 
 type stallReader struct {
@@ -248,6 +254,11 @@ func downloadParallel(client *http.Client, f *os.File, url string, total int64) 
 	}()
 
 	wg.Wait()
+	if fi, statErr := f.Stat(); statErr == nil && fi.Size() != total {
+		return fmt.Errorf("size mismatch after parallel download: got %d want %d", fi.Size(), total)
+	} else if statErr != nil {
+		return statErr
+	}
 	close(done)
 	fmt.Println()
 
@@ -364,6 +375,9 @@ func execApp() error {
 }
 
 func openLog() io.Writer {
+	if os.Getenv("APP_RUNNER_LOG_STDOUT_ONLY") == "1" {
+		return os.Stdout
+	}
 	lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return os.Stdout

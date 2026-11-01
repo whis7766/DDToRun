@@ -161,10 +161,10 @@ jobs:
               echo "FAIL: business download not recorded in guest log"; sudo umount guest-root; exit 1
             fi
             sudo umount guest-root
-          elif grep -q "app-runner" console.log 2>/dev/null; then
-            echo "PASS: app-runner started"
+          elif grep -q "downloaded new version" console.log 2>/dev/null; then
+            echo "PASS: business download completed"
           else
-            echo "WARN: app-runner not seen (TCG may be too slow), not blocking publish"
+            echo "FAIL: business download not recorded in boot log"; exit 1
           fi
 
       - name: Resolve release tag
