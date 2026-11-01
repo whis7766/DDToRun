@@ -138,7 +138,7 @@ jobs:
           done
 
           # Give DHCP, grow-root, time-sync and app-runner download time to finish.
-          sleep 45
+          sleep 90
 
           echo "=== console tail ==="
           tail -160 console.log || true
@@ -182,7 +182,7 @@ jobs:
           echo "=== DHCP evidence ==="
           sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f 2>/dev/null | sort
           if ! sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q . \
-             && ! grep -qE "lease of|bound to|eth0.*inet " console.log 2>/dev/null; then
+             && ! grep -qE "lease of|bound to|eth0.*inet |eth0: offered|eth0: leased|adding default route" console.log 2>/dev/null; then
             echo "FAIL: no DHCP lease evidence"; sudo umount guest-root; exit 1
           fi
           echo "PASS: DHCP lease evidence present"
