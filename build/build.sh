@@ -26,12 +26,15 @@ ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 ALPINE_BRANCH="${ALPINE_BRANCH:-v3.22}"
 KERNEL_FLAVOR="${KERNEL_FLAVOR:-virt}"
 HEADLESS_SSH="${HEADLESS_SSH:-false}"
+CJK_TTY="${CJK_TTY:-true}"
 # Headless SSH mode drops fbterm, CJK fonts, and the VGA kiosk takeover; the
 # app runs as a supervised background service and is accessed over SSH:3389.
 if [ "$HEADLESS_SSH" = "true" ]; then
   BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras openssh"
-else
+elif [ "$CJK_TTY" != "false" ]; then
   BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras font-wqy-zenhei libstdc++"
+else
+  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras"
 fi
 if [ "${CGO_COMPAT:-false}" = "true" ]; then
   BASE_PACKAGES="$BASE_PACKAGES gcompat libc6-compat"
@@ -80,7 +83,7 @@ export APK="$APK_STATIC"
 # Alpine ships no fbterm package; setup.sh compiles it natively in the chroot.
 # We fetch the upstream 1.7 release tarball here (not committed; gitignored) so
 # the chroot step can find it at /mnt/vendor/fbterm-src.tar.gz.
-if [ "$HEADLESS_SSH" != "true" ]; then
+if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
   echo "==> [3/6] provision fbterm source"
   VENDOR_FBTERM="$SCRIPT_DIR/vendor/fbterm-src.tar.gz"
   if [ -s "$VENDOR_FBTERM" ]; then
@@ -118,7 +121,7 @@ trap cleanup_loop EXIT
 echo "==> [5/6] build on $PART_DEV (kernel=${KERNEL_FLAVOR}, branch=${ALPINE_BRANCH})"
 # NOTE: --script-chroot is a boolean flag; the setup script is a positional
 # arg: alpine-make-vm-image [options] <image> [<script>]
-APP_URL="$APP_URL" APK="$APK" HEADLESS_SSH="$HEADLESS_SSH" \
+APP_URL="$APP_URL" APK="$APK" HEADLESS_SSH="$HEADLESS_SSH" CJK_TTY="$CJK_TTY" \
   "$TOOL" \
   --branch "$ALPINE_BRANCH" \
   --mirror-uri "$ALPINE_MIRROR" \
