@@ -39,4 +39,4 @@ jobs:
             --password test \
             --img '${{ inputs.image_url }}' 2>&1 | tee reinstall.log
           grep -E 'File type:|REINSTALL_TYPE_OK=' reinstall.log
-          grep -q 'REINSTALL_TYPE_OK=raw.zstd' reinstall.log
+          grep -q 'File type: raw.zstd' reinstall.log
