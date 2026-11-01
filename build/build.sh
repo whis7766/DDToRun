@@ -15,7 +15,7 @@
 #   IMAGE_SIZE_GB  image size in GB (default 1)
 #   ALPINE_MIRROR  apk mirror (default https://dl-cdn.alpinelinux.org/alpine)
 #   ALPINE_BRANCH  alpine branch (default v3.22)
-#   KERNEL_FLAVOR  kernel flavor (default virt = virtio drivers included)
+#   KERNEL_FLAVOR  kernel flavor (default lts; required for ext2 rootfs module)
 #   PACKAGES       extra apk packages (space separated)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,7 +24,7 @@ APP_URL="${APP_URL:-}"
 IMAGE_SIZE_GB="${IMAGE_SIZE_GB:-1}"
 ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 ALPINE_BRANCH="${ALPINE_BRANCH:-v3.22}"
-KERNEL_FLAVOR="${KERNEL_FLAVOR:-virt}"
+KERNEL_FLAVOR="${KERNEL_FLAVOR:-lts}"
 HEADLESS_SSH="${HEADLESS_SSH:-false}"
 CJK_TTY="${CJK_TTY:-true}"
 # Headless SSH mode drops fbterm, CJK fonts, and the VGA kiosk takeover; the
