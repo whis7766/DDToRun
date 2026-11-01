@@ -32,7 +32,7 @@ CJK_TTY="${CJK_TTY:-true}"
 if [ "$HEADLESS_SSH" = "true" ]; then
   BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras openssh"
 elif [ "$CJK_TTY" != "false" ]; then
-  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras font-wqy-zenhei libstdc++"
+  BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras font-wqy-zenhei fontconfig freetype ncurses libstdc++"
 else
   BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd busybox-extras"
 fi
