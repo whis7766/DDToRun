@@ -66,7 +66,7 @@ func newClient() *http.Client {
 		DialContext:           dialer.DialContext,
 		ReadBufferSize:        4 << 20,
 		WriteBufferSize:       4 << 20,
-		TLSHandshakeTimeout:    10 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
 		DisableCompression:    true, // binary, no gzip
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig: &tls.Config{
@@ -180,7 +180,10 @@ func downloadSingle(client *http.Client, f *os.File, url string) error {
 
 	stallRd := &stallReader{r: resp.Body, reset: timer.Reset}
 	pw := newProgress(resp.ContentLength)
+	progressDone := make(chan struct{})
+	go pw.Run(progressDone)
 	_, err = io.CopyBuffer(f, io.TeeReader(stallRd, pw), make([]byte, 1<<20))
+	close(progressDone)
 	fmt.Println()
 	return err
 }
@@ -219,18 +222,24 @@ func downloadParallel(client *http.Client, f *os.File, url string, total int64) 
 		}(start, end)
 	}
 
-	// Progress printer
+	// Progress printer with transfer speed
 	done := make(chan struct{})
+	var lastBytes atomic.Int64
+	lastTime := time.Now()
 	go func() {
 		t := time.NewTicker(500 * time.Millisecond)
 		defer t.Stop()
 		for {
 			select {
 			case <-t.C:
+				now := time.Now()
 				d := downloaded.Load()
+				old := lastBytes.Swap(d)
+				speed := float64(d-old) / now.Sub(lastTime).Seconds() / 1048576.0
+				lastTime = now
 				if total > 0 {
-					fmt.Printf("\r  下载中: %d%% (%d/%d MB, %d线程)   ",
-						d*100/total, d/1024/1024, total/1024/1024, numWorkers)
+					fmt.Printf("\r  下载中: %3d%%  %5.1f/%5.1f MB  %4.1f MB/s  %d线程   ",
+						d*100/total, float64(d)/1048576.0, float64(total)/1048576.0, speed, numWorkers)
 				}
 			case <-done:
 				return
@@ -304,16 +313,49 @@ func copyAt(f *os.File, r io.Reader, off int64, buf []byte, downloaded *atomic.I
 }
 
 type progressWriter struct {
-	total int64
-	read  atomic.Int64
+	total     int64
+	read      atomic.Int64
+	lastBytes atomic.Int64
+	lastTime  atomic.Int64
 }
 
-func newProgress(total int64) *progressWriter { return &progressWriter{total: total} }
+func newProgress(total int64) *progressWriter {
+	p := &progressWriter{total: total}
+	p.lastTime.Store(time.Now().UnixNano())
+	return p
+}
 
 func (p *progressWriter) Write(b []byte) (int, error) {
 	n := len(b)
 	p.read.Add(int64(n))
 	return n, nil
+}
+
+func (p *progressWriter) Run(done <-chan struct{}) {
+	t := time.NewTicker(500 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			now := time.Now().UnixNano()
+			oldTime := p.lastTime.Swap(now)
+			oldBytes := p.lastBytes.Swap(p.read.Load())
+			dt := float64(now-oldTime) / 1e9
+			if dt <= 0 {
+				continue
+			}
+			d := p.read.Load()
+			speed := float64(d-oldBytes) / dt / 1048576.0
+			if p.total > 0 {
+				fmt.Printf("\r  下载中: %3d%%  %5.1f/%5.1f MB  %4.1f MB/s   ",
+					d*100/p.total, float64(d)/1048576.0, float64(p.total)/1048576.0, speed)
+			} else {
+				fmt.Printf("\r  下载中: %5.1f MB  %4.1f MB/s   ", float64(d)/1048576.0, speed)
+			}
+		case <-done:
+			return
+		}
+	}
 }
 
 func execApp() error {
