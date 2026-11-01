@@ -27,9 +27,9 @@ on:
         default: "false"
         type: string
       headless_ssh:
-        description: "Lightweight SSH-only build: drop VGA/fbterm/CJK font, run app as supervised service on SSH port 3389"
+        description: "Optional lightweight SSH-only build: drop VGA/fbterm/CJK font, run app as supervised service on SSH port 3389. Default = VGA kiosk, no SSH."
         required: true
-        default: true
+        default: false
         type: boolean
 
 permissions:
