@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -366,6 +367,13 @@ func (p *progressWriter) Run(done <-chan struct{}) {
 	}
 }
 
+func prepareBeforeExec() {
+	// Stop any stale business process before replacing the launcher.
+	_ = exec.Command("pkill", "-f", "^/opt/business-app").Run()
+	// Reset and clear the foreground terminal before the app takes over.
+	fmt.Print("\033[2J\033[H\033[?25l")
+}
+
 func execApp() error {
 	argv := append([]string{appPath}, os.Args[1:]...)
 	return syscall.Exec(appPath, argv, os.Environ())
@@ -400,6 +408,7 @@ func main() {
 		fetch()
 		if haveApp() {
 			log.Println("running", appPath)
+			prepareBeforeExec()
 			if err := execApp(); err != nil {
 				log.Printf("exec failed: %v - restarting local copy in 2s", err)
 				status("exec failed: %v", err)
