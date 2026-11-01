@@ -145,7 +145,7 @@ jobs:
           echo "=== qemu stderr ==="
           cat qemu-stderr.log || true
 
-          echo "system_powerdown" | nc -U qemu-monitor.sock 2>/dev/null || true
+          echo "system_powerdown" | nc -U -w 1 qemu-monitor.sock 2>/dev/null || true
           for i in $(seq 1 15); do
             kill -0 "$QPID" 2>/dev/null || break
             sleep 1
@@ -170,7 +170,7 @@ jobs:
           echo "PASS: KVM kernel/rootfs/OpenRC boot"
 
           mkdir -p guest-root
-          sudo mount -o ro,loop,offset=1048576 test.img guest-root
+          sudo mount -o loop,offset=1048576 test.img guest-root
 
           echo "=== grow-root stamp ==="
           sudo cat guest-root/var/lib/grow-root.done 2>/dev/null || true
