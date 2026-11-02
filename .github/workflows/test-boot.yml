@@ -162,6 +162,7 @@ jobs:
             sudo cat guest-root/etc/resolv.conf 2>/dev/null
             sudo tail -20 guest-root/var/log/app-runner.log 2>/dev/null
             echo "--- guest boot-diag log (persisted by guest at boot) ---"
+            sudo ls -la guest-root/var/log/boot-diag.log guest-root/var/log/boot-diag.touched guest-root/etc/local.d/ 2>&1
             sudo cat guest-root/var/log/boot-diag.log 2>/dev/null || echo "(no boot-diag.log)"
             sudo umount guest-root; exit 1
           fi
