@@ -138,14 +138,24 @@ APP_URL="$APP_URL" APK="$APK" HEADLESS_SSH="$HEADLESS_SSH" CJK_TTY="$CJK_TTY" \
 echo "==> [6/6] install syslinux MBR boot code"
 MBR_TMP="$(mktemp /tmp/mbr.XXXXXX.bin)"
 MNT_DIR="$(mktemp -d /tmp/mbr-mnt.XXXXXX)"
-if mount "$PART_DEV" "$MNT_DIR" 2>/dev/null; then
-  cp "$MNT_DIR/usr/share/syslinux/mbr.bin" "$MBR_TMP" 2>/dev/null || true
-  rm -f "$MNT_DIR"/boot/System.map-* "$MNT_DIR"/boot/config-*
-  sync
-  umount "$MNT_DIR" 2>/dev/null || true
+if ! mount "$PART_DEV" "$MNT_DIR"; then
+  echo "failed to mount ext4 partition for final syslinux cleanup"
+  exit 1
 fi
+# Copy the 440-byte BIOS MBR bootstrap first; afterward the large build-time
+# syslinux directory (EFI/PXE/DOS/Windows tools and unused c32 modules) is not
+# part of runtime boot. extlinux has already copied the runtime modules to /boot.
+cp "$MNT_DIR/usr/share/syslinux/mbr.bin" "$MBR_TMP"
+[ -s "$MBR_TMP" ] || { echo "syslinux mbr.bin not found in image - boot will fail"; umount "$MNT_DIR"; exit 1; }
+for runtime_module in ldlinux.c32 menu.c32 libcom32.c32 libutil.c32; do
+  [ -s "$MNT_DIR/boot/$runtime_module" ] \
+    || { echo "required runtime syslinux module missing: boot/$runtime_module"; umount "$MNT_DIR"; exit 1; }
+done
+rm -f "$MNT_DIR"/boot/System.map-* "$MNT_DIR"/boot/config-*
+rm -rf "$MNT_DIR/usr/share/syslinux"
+sync
+umount "$MNT_DIR"
 rmdir "$MNT_DIR" 2>/dev/null || true
-[ -s "$MBR_TMP" ] || { echo "syslinux mbr.bin not found in image - boot will fail"; exit 1; }
 dd if="$MBR_TMP" of="$LOOP_DEV" bs=440 count=1 conv=notrunc status=none
 rm -f "$MBR_TMP"
 
