@@ -119,7 +119,9 @@ jobs:
           # copy so the KVM boot below can capture guest boot progress. The
           # production image itself is unchanged (no serial console). If the
           # guest stalls (e.g. networking/DHCP), the serial log shows where.
-          sudo sed -i 's/^\(APPEND[[:space:]]\{1,\}.*\)$/\1 console=ttyS0/' guest-edit/boot/extlinux.conf 2>/dev/null || true
+          sudo sed -i 's/^[[:space:]]*\(APPEND[[:space:]]\{1,\}.*\)$/\1 console=ttyS0/' guest-edit/boot/extlinux.conf 2>/dev/null || true
+          echo "--- test serial console enable check ---"
+          sudo grep -nE 'console=ttyS0|APPEND' guest-edit/boot/extlinux.conf 2>&1 || echo "WARN: serial console not enabled on test copy"
           if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" = "true" ]; then
             sudo test -x guest-edit/usr/bin/fbterm
             sudo test -s guest-edit/usr/share/terminfo/f/fbterm
@@ -157,9 +159,10 @@ jobs:
           pkill -9 -f 'qemu-system-x86_64.*test.img' 2>/dev/null || true
 
           echo "--- guest serial boot log (test-only capture) ---"
-          (grep -nE 'virtio|eth|udhcpc|dhcp|networking|app-runner|fbterm|local|mount|remount|Module|modprobe|ERROR|error|FAIL|Cannot|Starting service|rc-|kworker' /tmp/serial.log 2>/dev/null | head -60) || true
+          echo "serial.log size: $(wc -c </tmp/serial.log 2>/dev/null || echo 0)"
+          (grep -nE 'virtio|eth|udhcpc|dhcp|networking|app-runner|fbterm|local|mount|remount|Module|modprobe|ERROR|error|FAIL|Cannot|Starting service|rc-|kworker|switch_root|overlay' /tmp/serial.log 2>/dev/null | head -80) || true
           echo "--- serial log tail ---"
-          tail -30 /tmp/serial.log 2>/dev/null || true
+          tail -40 /tmp/serial.log 2>/dev/null || true
 
           mkdir -p guest-root
           sudo mount -o loop,offset=1048576 test.img guest-root
