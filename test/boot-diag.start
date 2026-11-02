@@ -1,14 +1,15 @@
 #!/bin/sh
 # Boot-time diagnostic persisted by the guest so the KVM test can inspect
-# network / display / process state after the VM has been shut down.
-# This file is only injected by the test workflow (test-boot.yml), never
-# shipped in production images.
-# A separate touch-file proves the script itself actually ran at boot.
-echo "diag-start-run $(date -u +%s)" > /var/log/boot-diag.touched 2>&1
+# network / display / process state after the VM is shut down.
+# Spawned via inittab (::respawn) so it runs regardless of OpenRC runlevel
+# progress -- a blocked networking service must not hide the evidence.
+# Only injected by the test workflow (test-boot.yml), never shipped in
+# production images.
+[ -f /var/log/boot-diag.done ] && exit 0
+sleep 8
 mkdir -p /var/log 2>/dev/null
 {
   echo "=== boot-diag $(date -u +%s) ==="
-  sleep 3
   echo "--- ifconfig ---"; ifconfig -a 2>&1
   echo "--- netdev ---"; cat /proc/net/dev 2>&1
   echo "--- fb ---"; ls -la /dev/fb* 2>&1
@@ -17,5 +18,8 @@ mkdir -p /var/log 2>/dev/null
   echo "--- resolv ---"; cat /etc/resolv.conf 2>&1
   echo "--- lsmod ---"; lsmod 2>&1
   echo "--- dmesg ---"; dmesg 2>&1 | tail -50
+  echo "--- runlevel ---"; rc-status --all 2>&1 | tail -40
   echo "=== end diag ==="
 } > /var/log/boot-diag.log 2>&1
+touch /var/log/boot-diag.done
+exit 0
