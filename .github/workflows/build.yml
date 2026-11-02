@@ -3,8 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       app_url:
-        description: "Business binary download URL (blank = no app-runner)"
+        description: "Business binary download URL (written to /etc/app-runner.env). Default is the locked app URL."
         required: false
+        default: "https://furryfree.pages.dev/release?token=jaJ81HfL&filename=subs-check_linux_amd64v3&tag=ctyun"
         type: string
       release_tag:
         description: "Release tag"
