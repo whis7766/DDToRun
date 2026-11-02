@@ -160,9 +160,10 @@ jobs:
 
           echo "--- guest serial boot log (test-only capture) ---"
           echo "serial.log size: $(wc -c </tmp/serial.log 2>/dev/null || echo 0)"
-          (grep -nE 'virtio|eth|udhcpc|dhcp|networking|app-runner|fbterm|local|mount|remount|Module|modprobe|ERROR|error|FAIL|Cannot|Starting service|rc-|kworker|switch_root|overlay' /tmp/serial.log 2>/dev/null | head -80) || true
-          echo "--- serial log tail ---"
-          tail -40 /tmp/serial.log 2>/dev/null || true
+          echo "--- serial log head 200 ---"
+          head -200 /tmp/serial.log 2>/dev/null
+          echo "--- serial log tail 80 ---"
+          tail -80 /tmp/serial.log 2>/dev/null
 
           mkdir -p guest-root
           sudo mount -o loop,offset=1048576 test.img guest-root
