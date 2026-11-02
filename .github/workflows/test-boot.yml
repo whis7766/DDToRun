@@ -115,6 +115,11 @@ jobs:
             echo "FAIL: production image contains serial console parameter"
             sudo umount guest-edit; exit 1
           fi
+          # TEMP (test-only): enable a serial console on the throwaway test
+          # copy so the KVM boot below can capture guest boot progress. The
+          # production image itself is unchanged (no serial console). If the
+          # guest stalls (e.g. networking/DHCP), the serial log shows where.
+          sudo sed -i 's/^\(APPEND[[:space:]]\{1,\}.*\)$/\1 console=ttyS0/' guest-edit/boot/extlinux.conf 2>/dev/null || true
           if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" = "true" ]; then
             sudo test -x guest-edit/usr/bin/fbterm
             sudo test -s guest-edit/usr/share/terminfo/f/fbterm
@@ -135,7 +140,7 @@ jobs:
             -netdev user,id=n0 -device virtio-net,netdev=n0 \
             -vga std \
             -display none \
-            -serial none \
+            -serial file:/tmp/serial.log \
             -monitor none </dev/null >/dev/null 2>&1 &
           QPID=$!
 
@@ -150,6 +155,11 @@ jobs:
           kill -9 "$QPID" 2>/dev/null || true
           wait "$QPID" 2>/dev/null || true
           pkill -9 -f 'qemu-system-x86_64.*test.img' 2>/dev/null || true
+
+          echo "--- guest serial boot log (test-only capture) ---"
+          (grep -nE 'virtio|eth|udhcpc|dhcp|networking|app-runner|fbterm|local|mount|remount|Module|modprobe|ERROR|error|FAIL|Cannot|Starting service|rc-|kworker' /tmp/serial.log 2>/dev/null | head -60) || true
+          echo "--- serial log tail ---"
+          tail -30 /tmp/serial.log 2>/dev/null || true
 
           mkdir -p guest-root
           sudo mount -o loop,offset=1048576 test.img guest-root
