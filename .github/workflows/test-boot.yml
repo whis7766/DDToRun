@@ -71,7 +71,7 @@ jobs:
         env:
           APP_URL: "${{ github.event.inputs.app_url }}"
           IMAGE_SIZE_GB: "${{ github.event.inputs.image_size_gb }}"
-          ALPINE_BRANCH: "edge"
+          ALPINE_BRANCH: "v3.22"
           CGO_COMPAT: "false"
           HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
           CJK_TTY: "${{ github.event.inputs.cjk_tty }}"
@@ -147,15 +147,27 @@ jobs:
           fi
           echo "PASS: ext4 journal disabled"
 
-          if ! sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q .; then
-            echo "FAIL: no DHCP lease evidence"; sudo umount guest-root; exit 1
-          fi
-          echo "PASS: DHCP lease evidence present"
-
+          # Business download success is the strongest proof the guest network is
+          # actually up (persisted, version-independent). Check it first.
           if ! sudo grep -q "downloaded new version" guest-root/var/log/app-runner.log 2>/dev/null; then
-            echo "FAIL: business download success not recorded"; sudo umount guest-root; exit 1
+            echo "FAIL: business download success not recorded (guest network may be down)"
+            echo "--- guest network evidence (diagnostic) ---"
+            sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f 2>/dev/null
+            sudo ls -la guest-root/etc/resolv.conf 2>/dev/null
+            sudo cat guest-root/etc/resolv.conf 2>/dev/null
+            sudo tail -20 guest-root/var/log/app-runner.log 2>/dev/null
+            sudo umount guest-root; exit 1
           fi
           echo "PASS: business binary downloaded and recorded"
+
+          # DHCP lease file location varies by dhcpcd version; report where leases
+          # landed but do not block on a lease file once download already proved
+          # the network is up.
+          if sudo find guest-root/var/lib/dhcpcd guest-root/run/dhcpcd -type f -size +0c 2>/dev/null | grep -q .; then
+            echo "PASS: DHCP lease evidence present"
+          else
+            echo "WARN: no DHCP lease file on checked paths (network confirmed via download)"
+          fi
 
           if [ "$HEADLESS_SSH" = "true" ]; then
             if ! sudo test -L guest-root/etc/runlevels/default/sshd; then

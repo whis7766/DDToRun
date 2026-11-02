@@ -17,9 +17,9 @@ on:
         default: "1"
         type: string
       alpine_branch:
-        description: "Alpine branch (edge = validated full kernel+network stack; v3.22 stable = smaller boot image)"
+        description: "Alpine branch (v3.22 stable = official virt ISO baseline, smaller and reproducible)"
         required: false
-        default: "edge"
+        default: "v3.22"
         type: string
       cgo_compat:
         description: "Install glibc compat layer (gcompat/libc6-compat/libstdc++) for dynamic CGO binaries. Off = pure static Go only, smaller image."
