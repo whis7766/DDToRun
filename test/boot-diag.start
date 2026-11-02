@@ -3,9 +3,12 @@
 # network / display / process state after the VM has been shut down.
 # This file is only injected by the test workflow (test-boot.yml), never
 # shipped in production images.
+# A separate touch-file proves the script itself actually ran at boot.
+echo "diag-start-run $(date -u +%s)" > /var/log/boot-diag.touched 2>&1
+mkdir -p /var/log 2>/dev/null
 {
   echo "=== boot-diag $(date -u +%s) ==="
-  sleep 8
+  sleep 3
   echo "--- ifconfig ---"; ifconfig -a 2>&1
   echo "--- netdev ---"; cat /proc/net/dev 2>&1
   echo "--- fb ---"; ls -la /dev/fb* 2>&1
