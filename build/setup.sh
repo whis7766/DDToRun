@@ -10,15 +10,14 @@ CJK_TTY="${CJK_TTY:-true}"
 echo "==> system config: hostname / network"
 setup-hostname vps-app
 
-# ifupdown-ng only manages the built-in loopback interface here. eth0 is managed
-# by the official dhcpcd OpenRC service, which provides a stable lease file and
-# automatic retry across Alpine stable releases.
 cat > /etc/network/interfaces <<'EOF'
 auto lo
 iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
 EOF
 rc-update add networking boot
-rc-update add dhcpcd boot
 
 # Disable IPv6 entirely (VPS has no IPv6 route; avoids IPv6 DNS timeouts).
 cat > /etc/sysctl.conf <<'EOF'
