@@ -102,6 +102,15 @@ jobs:
           if ! sudo grep -q 'boot-diag.sh' guest-edit/etc/inittab; then
             echo '::respawn:/usr/local/sbin/boot-diag.sh' | sudo tee -a guest-edit/etc/inittab
           fi
+          echo "--- verify injected boot-diag ---"
+          sudo ls -la guest-edit/usr/local/sbin/boot-diag.sh 2>&1
+          sudo grep 'boot-diag' guest-edit/etc/inittab 2>&1
+          echo "--- verify trimmed /lib/modules ---"
+          KVER_G="$(sudo ls guest-edit/lib/modules 2>/dev/null | head -1)"
+          echo "kver=$KVER_G"
+          sudo ls -la "guest-edit/lib/modules/$KVER_G/" 2>&1 | head -40
+          echo "--- initramfs key-module inventory ---"
+          (cd guest-edit/boot && sudo sh -c 'zcat initramfs-virt 2>/dev/null | cpio -it 2>/dev/null' ) 2>&1 | grep -iE 'virtio|ext4|net_failover|failover|jbd2|mbcache|crc32' | head -40 || true
           if sudo grep -q 'console=ttyS0' guest-edit/boot/extlinux.conf; then
             echo "FAIL: production image contains serial console parameter"
             sudo umount guest-edit; exit 1
