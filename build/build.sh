@@ -28,7 +28,7 @@ KERNEL_FLAVOR="${KERNEL_FLAVOR:-virt}"
 HEADLESS_SSH="${HEADLESS_SSH:-false}"
 CJK_TTY="${CJK_TTY:-true}"
 # Headless SSH mode drops fbterm, CJK fonts, and the VGA kiosk takeover; the
-# app runs as a supervised background service and is accessed over SSH:3389.
+# app runs as a supervised background service and is accessed over SSH:22.
 if [ "$HEADLESS_SSH" = "true" ]; then
   BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd openssh"
 elif [ "$CJK_TTY" != "false" ]; then
