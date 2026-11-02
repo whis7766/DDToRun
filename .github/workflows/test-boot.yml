@@ -94,8 +94,14 @@ jobs:
           # Inject a boot-time diagnostic so the guest persists its network /
           # display / process state at boot (the VM is shut down before the
           # checks run, so runtime state must be written by the guest itself).
-          sudo cp "$GITHUB_WORKSPACE/test/boot-diag.start" guest-edit/etc/local.d/99-boot-diag.start
-          sudo chmod +x guest-edit/etc/local.d/99-boot-diag.start
+          # Spawn it via inittab (::respawn) so it runs even if a runlevel
+          # service blocks (a stuck networking/DHCP would otherwise hide the
+          # evidence because local.d + app-runner sit in the default runlevel).
+          sudo cp "$GITHUB_WORKSPACE/test/boot-diag.start" guest-edit/usr/local/sbin/boot-diag.sh
+          sudo chmod +x guest-edit/usr/local/sbin/boot-diag.sh
+          if ! sudo grep -q 'boot-diag.sh' guest-edit/etc/inittab; then
+            echo '::respawn:/usr/local/sbin/boot-diag.sh' | sudo tee -a guest-edit/etc/inittab
+          fi
           if sudo grep -q 'console=ttyS0' guest-edit/boot/extlinux.conf; then
             echo "FAIL: production image contains serial console parameter"
             sudo umount guest-edit; exit 1
