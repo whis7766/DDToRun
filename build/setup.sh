@@ -49,12 +49,11 @@ rc-update del crond default >/dev/null 2>&1 || true
 rc-update del syslog boot >/dev/null 2>&1 || true
 rc-update del swap boot >/dev/null 2>&1 || true
 rc-update del hwclock boot >/dev/null 2>&1 || true
-# virt kernel has all drivers built-in; no hardware probing / cgroup namespaces
-# needed for a single-app appliance. sysctl config is empty and dmesg buffer is
-# not consumed - skip them to shorten boot.
+# A fixed VM appliance does not need hardware probing or cgroup namespace
+# setup. The official kernel module tree remains intact; only unnecessary
+# OpenRC services are skipped. Keep sysctl because IPv6 must be disabled there.
 rc-update del cgroups sysinit >/dev/null 2>&1 || true
 rc-update del hwdrivers sysinit >/dev/null 2>&1 || true
-# Keep sysctl boot: we need it to apply disable_ipv6.
 rc-update del dmesg sysinit >/dev/null 2>&1 || true
 
 sed -i '/^#\?ttyS0::respawn:/d' /etc/inittab
