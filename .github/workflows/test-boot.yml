@@ -158,12 +158,10 @@ jobs:
           wait "$QPID" 2>/dev/null || true
           pkill -9 -f 'qemu-system-x86_64.*test.img' 2>/dev/null || true
 
-          echo "--- guest serial boot log (test-only capture) ---"
+          echo "--- guest serial boot log (test-only capture, key lines) ---"
           echo "serial.log size: $(wc -c </tmp/serial.log 2>/dev/null || echo 0)"
-          echo "--- serial log head 200 ---"
-          head -200 /tmp/serial.log 2>/dev/null
-          echo "--- serial log tail 80 ---"
-          tail -80 /tmp/serial.log 2>/dev/null
+          grep -E 'EXT4|virtio_net|eth0|dhcp|BPF|downloaded|fbterm|ERROR|FAIL|emergency|Mounting root' \
+            /tmp/serial.log 2>/dev/null | tail -40 || true
 
           mkdir -p guest-root
           sudo mount -o loop,offset=1048576 test.img guest-root
@@ -210,13 +208,39 @@ jobs:
             if ! sudo test -L guest-root/etc/runlevels/default/sshd; then
               echo "FAIL: sshd not enabled in default runlevel"; sudo umount guest-root; exit 1
             fi
-            sudo grep -q '^Port 22$' guest-root/etc/ssh/sshd_config
-            sudo test -s guest-root/etc/ssh/ssh_host_ed25519_key
-            sudo test -s guest-root/root/.ssh/authorized_keys
-            echo "PASS: headless sshd configuration installed"
+            sudo grep -q '^Port 22$' guest-root/etc/ssh/sshd_config \
+              || { echo "FAIL: sshd not listening on port 22"; sudo umount guest-root; exit 1; }
+            sudo test -s guest-root/etc/ssh/ssh_host_ed25519_key \
+              || { echo "FAIL: baked host key missing"; sudo umount guest-root; exit 1; }
+            sudo test -s guest-root/root/.ssh/authorized_keys \
+              || { echo "FAIL: authorized_keys missing"; sudo umount guest-root; exit 1; }
+            # Baked host fingerprint must match the rotated vendor host key.
+            EXPECT_HOST_FP="$(ssh-keygen -lf "$GITHUB_WORKSPACE/build/vendor/ssh_host_ed25519_key.pub" | awk '{print $2}')"
+            GOT_HOST_FP="$(sudo ssh-keygen -lf guest-root/etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')"
+            if [ "$EXPECT_HOST_FP" != "$GOT_HOST_FP" ]; then
+              echo "FAIL: host fingerprint mismatch expected=$EXPECT_HOST_FP got=$GOT_HOST_FP"
+              sudo umount guest-root; exit 1
+            fi
+            # authorized_keys must carry the rotated user public key.
+            EXPECT_USER_PUB="$(awk '{print $2}' "$GITHUB_WORKSPACE/build/vendor/ssh_user_key.pub")"
+            if ! sudo grep -qF "$EXPECT_USER_PUB" guest-root/root/.ssh/authorized_keys; then
+              echo "FAIL: rotated user public key absent from authorized_keys"
+              sudo umount guest-root; exit 1
+            fi
+            # SSH flavor must not carry VGA/fbterm/CJK components.
+            if sudo test -e guest-root/usr/bin/fbterm; then
+              echo "FAIL: SSH image unexpectedly contains fbterm"; sudo umount guest-root; exit 1
+            fi
+            echo "PASS: headless sshd on port 22; rotated host fingerprint + user key verified; no VGA components"
+          else
+            # VGA kiosk flavor: kiosk components present, sshd absent.
+            sudo test -x guest-root/usr/bin/fbterm \
+              || { echo "FAIL: VGA image missing fbterm"; sudo umount guest-root; exit 1; }
+            if sudo test -e guest-root/etc/ssh/sshd_config; then
+              echo "FAIL: VGA image unexpectedly contains sshd_config"; sudo umount guest-root; exit 1
+            fi
+            echo "PASS: VGA kiosk components present; sshd absent"
           fi
 
           sudo umount guest-root
-          echo "--- guest boot-diag log (persisted by guest at boot) ---"
-          sudo cat guest-root/var/log/boot-diag.log 2>/dev/null || echo "(no boot-diag.log)"
           echo "PASS: independent KVM boot test completed"
