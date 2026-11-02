@@ -141,7 +141,7 @@ EOF
 chmod +x /etc/init.d/time-sync
 rc-update add time-sync boot
 
-# --- SSH remote access (sshd on port 3389, key-only) ---------------------
+# --- SSH remote access (sshd on port 22, key-only) ----------------------
 # Headless builds only. Host keys are baked in from /mnt/vendor/ so the host
 # fingerprint stays stable; root login is key-only.
 if [ "$HEADLESS_SSH" = "true" ]; then
@@ -155,9 +155,9 @@ fi
 if [ -f /mnt/vendor/ssh_user_key.pub ]; then
     install -m 0600 /mnt/vendor/ssh_user_key.pub /root/.ssh/authorized_keys
 fi
-# sshd config: port 3389, key-only root, no password, no idle timeout
+# sshd config: port 22, key-only root, no password, no idle timeout
 cat > /etc/ssh/sshd_config <<'EOF'
-Port 3389
+Port 22
 ListenAddress 0.0.0.0
 PermitRootLogin prohibit-password
 PasswordAuthentication no

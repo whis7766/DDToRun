@@ -1,4 +1,10 @@
 name: Build Alpine VPS App Runner Image
+
+# Two flavors are built in parallel and published together to the release tag:
+#   vpsvga - default VGA kiosk (fbterm + CJK font on tty1), no SSH
+#   vpsssh - headless SSH-only (sshd on port 22, key-only; app as supervised service)
+# Production build only: no QEMU/serial debug steps in this workflow.
+
 on:
   workflow_dispatch:
     inputs:
@@ -17,25 +23,15 @@ on:
         default: "1"
         type: string
       alpine_branch:
-        description: "Alpine branch (v3.22 stable = official virt ISO baseline, smaller and reproducible)"
+        description: "Alpine branch (v3.22 stable = official virt baseline, smaller and reproducible)"
         required: false
         default: "v3.22"
         type: string
       cgo_compat:
-        description: "Install glibc compat layer (gcompat/libc6-compat/libstdc++) for dynamic CGO binaries. Off = pure static Go only, smaller image."
+        description: "Install glibc compat layer (gcompat/libc6-compat). Off = pure static Go only, smaller image."
         required: true
         default: "false"
         type: string
-      headless_ssh:
-        description: "Optional lightweight SSH-only build: drop VGA/fbterm/CJK font, run app as supervised service on SSH port 3389. Default = VGA kiosk, no SSH."
-        required: true
-        default: false
-        type: boolean
-      cjk_tty:
-        description: "Enable fbterm + CJK font on the VGA tty1 console (default enabled; disable for a smaller ASCII-only image)."
-        required: true
-        default: true
-        type: boolean
 
 permissions:
   contents: write
@@ -43,8 +39,14 @@ permissions:
 
 jobs:
   build:
-    name: Build + publish
+    name: Build ${{ matrix.profile.asset }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - { asset: vpsvga, headless_ssh: "false", cjk_tty: "true" }
+          - { asset: vpsssh, headless_ssh: "true",  cjk_tty: "false" }
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -68,26 +70,51 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zerofree zstd
 
-      - name: Build image
+      - name: Build image (${{ matrix.profile.asset }})
         env:
           APP_URL: "${{ github.event.inputs.app_url }}"
           IMAGE_SIZE_GB: "${{ github.event.inputs.image_size_gb }}"
           ALPINE_BRANCH: "${{ github.event.inputs.alpine_branch }}"
           CGO_COMPAT: "${{ github.event.inputs.cgo_compat }}"
-          HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
-          CJK_TTY: "${{ github.event.inputs.cjk_tty }}"
+          HEADLESS_SSH: "${{ matrix.profile.headless_ssh }}"
+          CJK_TTY: "${{ matrix.profile.cjk_tty }}"
         run: |
           sudo -E bash build/build.sh
 
-      - name: Compress
+      - name: Compress to ${{ matrix.profile.asset }}
         run: |
           cd "$GITHUB_WORKSPACE/dist"
           sudo chown -R "$(id -un):$(id -gn)" .
           RAW="vps-app-runner.img.raw"
-          ZST="vpsapp"
-          zstd -q -22 --ultra --long=27 -f "$RAW" -o "$ZST"
-          ls -lh "$RAW" "$ZST"
-          stat -c '%n %s bytes' "$RAW" "$ZST"
+          OUT="${{ matrix.profile.asset }}"
+          zstd -q -22 --ultra --long=27 -f "$RAW" -o "$OUT"
+          sha256sum "$OUT" | tee "$OUT.sha256"
+          ls -lh "$OUT"
+          stat -c '%n %s bytes' "$OUT"
+
+      - name: Upload compressed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.profile.asset }}
+          path: |
+            dist/${{ matrix.profile.asset }}
+            dist/${{ matrix.profile.asset }}.sha256
+          retention-days: 1
+
+  publish:
+    name: Publish both assets to release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download both compressed assets
+        uses: actions/download-artifact@v5
+        with:
+          pattern: pkg-*
+          path: dist
+          merge-multiple: true
 
       - name: Resolve release tag
         id: resolve_tag
@@ -97,6 +124,21 @@ jobs:
           TAG="${INPUT_TAG:-dd}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Release tag: ${TAG}"
+
+      - name: Remove superseded legacy asset (vpsapp)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.resolve_tag.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx 'vpsapp'; then
+              gh release delete-asset "$TAG" vpsapp --yes || true
+              echo "removed legacy asset vpsapp"
+            fi
+          else
+            echo "release $TAG does not exist yet; nothing to clean"
+          fi
+
       - name: Move release tag to current commit
         env:
           TAG: ${{ steps.resolve_tag.outputs.tag }}
@@ -104,14 +146,15 @@ jobs:
           git tag -f "${TAG}" HEAD
           git push origin "refs/tags/${TAG}" --force
 
-      - name: Create Release
+      - name: Create/Update Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.resolve_tag.outputs.tag }}
           name: ${{ steps.resolve_tag.outputs.tag }}
           body: ""
           files: |
-            dist/vpsapp
+            dist/vpsvga
+            dist/vpsssh
 
       - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v2

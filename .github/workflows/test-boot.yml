@@ -210,7 +210,7 @@ jobs:
             if ! sudo test -L guest-root/etc/runlevels/default/sshd; then
               echo "FAIL: sshd not enabled in default runlevel"; sudo umount guest-root; exit 1
             fi
-            sudo grep -q '^Port 3389$' guest-root/etc/ssh/sshd_config
+            sudo grep -q '^Port 22$' guest-root/etc/ssh/sshd_config
             sudo test -s guest-root/etc/ssh/ssh_host_ed25519_key
             sudo test -s guest-root/root/.ssh/authorized_keys
             echo "PASS: headless sshd configuration installed"
