@@ -27,11 +27,6 @@ on:
         required: false
         default: "v3.22"
         type: string
-      cgo_compat:
-        description: "Install glibc compat layer (gcompat/libc6-compat). Off = pure static Go only, smaller image."
-        required: true
-        default: "false"
-        type: string
 
 permissions:
   contents: write
@@ -75,7 +70,6 @@ jobs:
           APP_URL: "${{ github.event.inputs.app_url }}"
           IMAGE_SIZE_GB: "${{ github.event.inputs.image_size_gb }}"
           ALPINE_BRANCH: "${{ github.event.inputs.alpine_branch }}"
-          CGO_COMPAT: "${{ github.event.inputs.cgo_compat }}"
           HEADLESS_SSH: "${{ matrix.profile.headless_ssh }}"
           CJK_TTY: "${{ matrix.profile.cjk_tty }}"
         run: |
