@@ -366,7 +366,10 @@ KVER="$(ls /lib/modules 2>/dev/null | head -1)"
 if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
     MROOT="/lib/modules/$KVER"
     DEP="$MROOT/modules.dep"
-    SEEDS="virtio virtio_ring virtio_pci virtio_mmio virtio_blk virtio_net virtio_rng virtio_balloon virtio_console e1000 e1000e tun sch_fq sch_netem tcp_bbr ext4 jbd2 mbcache crc32c_intel crc32c_generic crc16 crc32_generic rng_core net_failover failover af_packet"
+    # Omit console/serial drivers (virtio_console/hvc) and test emulation
+    # modules (sch_netem): this production appliance has no serial console and
+    # never injects delay/loss for testing; nothing kept depends on them.
+    SEEDS="virtio virtio_ring virtio_pci virtio_mmio virtio_blk virtio_net virtio_rng virtio_balloon e1000 e1000e tun sch_fq tcp_bbr ext4 jbd2 mbcache crc32c_intel crc32c_generic crc16 crc32_generic rng_core net_failover failover af_packet"
     if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
         # VGA kiosk needs the framebuffer + drm chain (fbterm -> /dev/fb0).
         SEEDS="$SEEDS fb fb_sys_fops sysfillrect sysimgblt syscopyarea drm drm_kms_helper drm_shmem_helper drm_ttm_helper ttm simpledrm bochs virtio_gpu i2c_core"
