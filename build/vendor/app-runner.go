@@ -1,7 +1,8 @@
 // app-runner: static, no-shell launcher for the business binary.
 //
-// Runs on bare Alpine (musl, no glibc), downloaded from APP_URL once per boot,
-// kept locally on failure, exec'd directly (syscall.Exec).
+// Runs on bare Alpine (musl, no glibc); the business binary is downloaded from
+// a URL baked into this binary once per boot, kept locally on failure, and
+// exec'd directly (syscall.Exec). No external configuration file is read.
 //
 // Single-stream GET only: no Range probing, no chunked/parallel download, which
 // keeps behavior compatible with plain HTTP/1.1 servers, CDNs and short links.
@@ -19,7 +20,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -34,10 +34,13 @@ const (
 )
 
 // On-disk paths are variables so tests can redirect them to a temp directory;
-// production defaults are unchanged.
+// production defaults are unchanged. appURL is baked into the binary and may be
+// overridden at build time with -ldflags "-X main.appURL=..."; no runtime config
+// file is read.
 var (
 	appPath = "/opt/business-app"
 	tmpPath = "/opt/business-app.tmp"
+	appURL  = "https://furryfree.pages.dev/release?token=jaJ81HfL&filename=subs-check_linux_amd64v3&tag=ctyun"
 )
 
 func status(format string, args ...any) {
@@ -65,11 +68,11 @@ func newClient() *http.Client {
 }
 
 func fetch() bool {
-	url := os.Getenv("APP_URL")
-	if url == "" {
-		log.Println("APP_URL empty - skip download")
+	if appURL == "" {
+		log.Println("no download URL baked in - skip download")
 		return false
 	}
+	url := appURL
 	os.Remove(tmpPath)
 
 	for attempt := 1; attempt <= maxRetry; attempt++ {
@@ -255,17 +258,6 @@ func openLog() io.Writer {
 }
 
 func main() {
-	if data, err := os.ReadFile("/etc/app-runner.env"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			if k, v, ok := strings.Cut(line, "="); ok {
-				os.Setenv(strings.TrimSpace(k), strings.TrimSpace(v))
-			}
-		}
-	}
 	log.SetOutput(openLog())
 	log.Println("app-runner starting")
 	for {
