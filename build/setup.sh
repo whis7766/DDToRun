@@ -297,21 +297,34 @@ EOF
         chmod +x /etc/init.d/app-runner
         rc-update add app-runner default
     else
-        # Default VGA kiosk: fbterm + wqy-zenhei on tty1 renders the app with
-        # CJK full-screen. fbterm needs /dev/fb0, which the VGA flavor ensures
-        # by loading the framebuffer/drm drivers in /etc/modules below.
+        # Default VGA kiosk: the single CJK-only boot path. fbterm + wqy-zenhei
+        # render the app full-screen on /dev/fb0. There is deliberately NO text
+        # console fallback: if no framebuffer device appears the script exits
+        # (inittab respawns it); it never switches to an ASCII-only console.
         cat > /usr/local/sbin/app-runner-fb.sh <<'EOF'
 #!/bin/sh
+# Single CJK path: fbterm full-screen on the framebuffer. No text fallback.
 printf 'nameserver 119.29.29.29\nnameserver 223.5.5.5\n' > /etc/resolv.conf 2>/dev/null
 pkill -f '^/opt/business-app' 2>/dev/null || true
 stty sane 2>/dev/null || true
-printf '\033c' 2>/dev/null || true
-printf '\033[2J\033[H' 2>/dev/null || true
+# Probe every common virtual display controller; modprobe pulls the drm/fb
+# dependency closure in automatically (bochs=QEMU std VGA, cirrus=QEMU cirrus,
+# virtio-gpu=virtio GPU, simpledrm=simple-framebuffer/EFI GOP).
+for m in bochs cirrus virtio-gpu simpledrm; do modprobe "$m" 2>/dev/null || true; done
+# Wait for the kernel to register /dev/fb0 after a driver binds the hardware.
+i=0
+while [ ! -c /dev/fb0 ] && [ "$i" -lt 30 ]; do
+    modprobe fb 2>/dev/null || true
+    i=$((i + 1))
+    sleep 0.5
+done
 FBTERM="$(command -v fbterm || true)"
 FONT="$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)"
-[ -c /dev/fb0 ] || { echo "fb0 missing - framebuffer driver not loaded"; exit 1; }
+[ -c /dev/fb0 ] || { echo "fb0 missing: no framebuffer device bound"; sleep 3; exit 1; }
 [ -n "$FBTERM" ] || { echo "fbterm missing"; exit 1; }
 [ -n "$FONT" ] || { echo "CJK font missing"; exit 1; }
+printf '\033c' 2>/dev/null || true
+printf '\033[2J\033[H' 2>/dev/null || true
 RUN="exec /usr/local/sbin/app-runner 2>&1 | tee -a /var/log/app-runner.log"
 APP_RUNNER_LOG_STDOUT_ONLY=1 exec "$FBTERM" -f "$FONT" -s 22 -- sh -c "$RUN"
 EOF
@@ -337,10 +350,12 @@ mbcache
 sch_fq
 EOF
 # VGA flavor loads framebuffer/drm drivers so fbterm gets /dev/fb0 on cloud
-# desktops that expose a virtual GPU (QEMU std VGA -> bochs, virtio-gpu,
-# EFI GOP -> simpledrm). Modules that do not exist are skipped by modprobe.
+# desktops that expose a virtual GPU (QEMU std VGA -> bochs, QEMU cirrus ->
+# cirrus, virtio-gpu, simple-framebuffer/EFI GOP -> simpledrm). Module names
+# use the real modprobe basename (virtio-gpu, not virtio_gpu); unknown names are
+# skipped by modprobe, and drm/fb/i2c-core/virtio_dma_buf load as dependencies.
 if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
-    for m in fb bochs virtio_gpu simpledrm; do
+    for m in bochs cirrus virtio-gpu simpledrm; do
         grep -qx "$m" /etc/modules || echo "$m" >> /etc/modules
     done
 fi
@@ -382,7 +397,7 @@ if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
     SEEDS="virtio virtio_ring virtio_pci virtio_mmio virtio_blk virtio_net virtio_rng virtio_balloon e1000 e1000e tun sch_fq tcp_bbr ext4 jbd2 mbcache crc32c_intel crc32c_generic crc16 crc32_generic rng_core net_failover failover af_packet"
     if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
         # VGA kiosk needs the framebuffer + drm chain (fbterm -> /dev/fb0).
-        SEEDS="$SEEDS fb fb_sys_fops sysfillrect sysimgblt syscopyarea drm drm_kms_helper drm_shmem_helper drm_ttm_helper ttm simpledrm bochs virtio_gpu i2c_core"
+        SEEDS="$SEEDS fb fb_sys_fops sysfillrect sysimgblt syscopyarea drm drm_kms_helper drm_shmem_helper drm_ttm_helper drm_vram_helper ttm simpledrm bochs cirrus virtio_gpu i2c_core virtio_dma_buf"
     fi
     KEEPFILE="/tmp/keepmods.$$"
     : > "$KEEPFILE"
