@@ -297,22 +297,28 @@ EOF
         chmod +x /etc/init.d/app-runner
         rc-update add app-runner default
     else
-        # Default VGA kiosk: fbterm + wqy-zenhei on tty1. Required components
-        # are verified during build; there is no plain-text tty fallback.
+        # Default VGA kiosk: fbterm + wqy-zenhei on tty1 for CJK full-screen
+        # when the console has a framebuffer (/dev/fb0). Cloud desktops without
+        # a framebuffer (e.g. CTyun AI cloud PC) fall back to running the app
+        # directly on the text console so the business binary still boots.
         cat > /usr/local/sbin/app-runner-fb.sh <<'EOF'
 #!/bin/sh
 printf 'nameserver 119.29.29.29\nnameserver 223.5.5.5\n' > /etc/resolv.conf 2>/dev/null
 pkill -f '^/opt/business-app' 2>/dev/null || true
 stty sane 2>/dev/null || true
-printf '\033c' 2>/dev/null || true
-printf '\033[2J\033[H' 2>/dev/null || true
+# fbterm renders CJK full-screen and needs /dev/fb0. Some cloud desktops expose
+# no framebuffer; there we skip fbterm and run the app on the text console so
+# the business binary still boots even without a framebuffer.
 FBTERM="$(command -v fbterm || true)"
 FONT="$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)"
-[ -c /dev/fb0 ] || { echo "fb0 missing"; exit 1; }
-[ -n "$FBTERM" ] || { echo "fbterm missing"; exit 1; }
-[ -n "$FONT" ] || { echo "CJK font missing"; exit 1; }
-RUN="exec /usr/local/sbin/app-runner 2>&1 | tee -a /var/log/app-runner.log"
-APP_RUNNER_LOG_STDOUT_ONLY=1 exec "$FBTERM" -f "$FONT" -s 22 -- sh -c "$RUN"
+if [ -c /dev/fb0 ] && [ -n "$FBTERM" ] && [ -n "$FONT" ]; then
+    printf '\033c' 2>/dev/null || true
+    printf '\033[2J\033[H' 2>/dev/null || true
+    RUN="exec /usr/local/sbin/app-runner 2>&1 | tee -a /var/log/app-runner.log"
+    APP_RUNNER_LOG_STDOUT_ONLY=1 exec "$FBTERM" -f "$FONT" -s 22 -- sh -c "$RUN"
+fi
+# No framebuffer/fbterm: run the launcher directly on the text console.
+/usr/local/sbin/app-runner 2>&1 | tee -a /var/log/app-runner.log
 EOF
         chmod +x /usr/local/sbin/app-runner-fb.sh
         sed -i 's|^#\?tty1::respawn:.*|tty1::respawn:/usr/local/sbin/app-runner-fb.sh|' /etc/inittab
