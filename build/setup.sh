@@ -200,8 +200,18 @@ mkdir -p /opt /usr/local/sbin /var/log
         echo "==> building fbterm from upstream source using its autotools guide"
         # Community-standard Alpine pattern: group temporary build packages in a
         # virtual world group, then remove the group and unused dependencies.
-        apk add --no-cache --virtual .fbterm-build-deps \
-            build-base pkgconf fontconfig-dev freetype-dev linux-headers >/dev/null 2>&1 || true
+        # Explicit C/C++ toolchain; retry transient apk fetch failures and fail
+        # loudly here instead of letting ./configure die with a vague
+        # "C++ compiler cannot create executables" after a half-installed set.
+        for attempt in 1 2 3; do
+            if apk add --no-cache --virtual .fbterm-build-deps \
+                build-base g++ pkgconf fontconfig-dev freetype-dev linux-headers; then
+                break
+            fi
+            echo "fbterm build-deps install attempt $attempt failed; retrying"
+            sleep 3
+        done
+        command -v g++ >/dev/null 2>&1 || { echo "ERROR: g++ unavailable after build-deps install"; exit 1; }
         cd /tmp
         rm -rf /tmp/fbterm-*
         tar xzf /mnt/vendor/fbterm-src.tar.gz 2>/dev/null
@@ -307,10 +317,12 @@ EOF
 printf 'nameserver 119.29.29.29\nnameserver 223.5.5.5\n' > /etc/resolv.conf 2>/dev/null
 pkill -f '^/opt/business-app' 2>/dev/null || true
 stty sane 2>/dev/null || true
-# Probe every common virtual display controller; modprobe pulls the drm/fb
+# Probe common virtual display controllers; modprobe pulls the drm/fb
 # dependency closure in automatically (bochs=QEMU std VGA, cirrus=QEMU cirrus,
-# virtio-gpu=virtio GPU, simpledrm=simple-framebuffer/EFI GOP).
-for m in bochs cirrus virtio-gpu simpledrm; do modprobe "$m" 2>/dev/null || true; done
+# virtio-gpu=virtio GPU, qxl=SPICE/QXL cloud desktop, vmwgfx=VMware SVGA,
+# vboxvideo=VirtualBox, hyperv_drm=Hyper-V, drm_xen_front=Xen; simpledrm=
+# simple-framebuffer/EFI GOP). Only drivers matching an actual device bind.
+for m in bochs cirrus virtio-gpu simpledrm qxl vmwgfx vboxvideo hyperv_drm drm_xen_front; do modprobe "$m" 2>/dev/null || true; done
 # Wait for the kernel to register /dev/fb0 after a driver binds the hardware.
 i=0
 while [ ! -c /dev/fb0 ] && [ "$i" -lt 30 ]; do
@@ -355,7 +367,7 @@ EOF
 # use the real modprobe basename (virtio-gpu, not virtio_gpu); unknown names are
 # skipped by modprobe, and drm/fb/i2c-core/virtio_dma_buf load as dependencies.
 if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
-    for m in bochs cirrus virtio-gpu simpledrm; do
+    for m in bochs cirrus virtio-gpu simpledrm qxl vmwgfx vboxvideo hyperv_drm drm_xen_front; do
         grep -qx "$m" /etc/modules || echo "$m" >> /etc/modules
     done
 fi
@@ -397,7 +409,9 @@ if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
     SEEDS="virtio virtio_ring virtio_pci virtio_mmio virtio_blk virtio_net virtio_rng virtio_balloon e1000 e1000e tun sch_fq tcp_bbr ext4 jbd2 mbcache crc32c_intel crc32c_generic crc16 crc32_generic rng_core net_failover failover af_packet"
     if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
         # VGA kiosk needs the framebuffer + drm chain (fbterm -> /dev/fb0).
-        SEEDS="$SEEDS fb fb_sys_fops sysfillrect sysimgblt syscopyarea drm drm_kms_helper drm_shmem_helper drm_ttm_helper drm_vram_helper ttm simpledrm bochs cirrus virtio_gpu i2c_core virtio_dma_buf"
+        # Include the common cloud hypervisor display drivers; dependency closure
+        # automatically keeps ttm, i2c-core, xen-front-pgdir-shbuf, etc.
+        SEEDS="$SEEDS fb fb_sys_fops sysfillrect sysimgblt syscopyarea drm drm_kms_helper drm_shmem_helper drm_ttm_helper drm_vram_helper ttm simpledrm bochs cirrus virtio_gpu qxl vmwgfx vboxvideo hyperv_drm drm_xen_front i2c_core virtio_dma_buf"
     fi
     KEEPFILE="/tmp/keepmods.$$"
     : > "$KEEPFILE"
