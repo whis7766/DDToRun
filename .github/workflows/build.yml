@@ -157,6 +157,8 @@ jobs:
           files: |
             dist/vpsvga
             dist/vpsssh
+            dist/vpsvga.sha256
+            dist/vpsssh.sha256
 
       - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v2
