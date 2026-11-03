@@ -236,8 +236,9 @@ func prepareBeforeExec() {
 }
 
 func execApp() error {
-	argv := append([]string{appPath}, os.Args[1:]...)
-	return syscall.Exec(appPath, argv, os.Environ())
+	// Start the business program with a bare argv[0]; do not forward any
+	// launcher arguments to it.
+	return syscall.Exec(appPath, []string{appPath}, os.Environ())
 }
 
 func openLog() io.Writer {
