@@ -72,7 +72,6 @@ jobs:
           APP_URL: "${{ github.event.inputs.app_url }}"
           IMAGE_SIZE_GB: "${{ github.event.inputs.image_size_gb }}"
           ALPINE_BRANCH: "v3.22"
-          CGO_COMPAT: "false"
           HEADLESS_SSH: "${{ github.event.inputs.headless_ssh }}"
           CJK_TTY: "${{ github.event.inputs.cjk_tty }}"
         run: |

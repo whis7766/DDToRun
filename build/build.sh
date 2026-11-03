@@ -36,9 +36,6 @@ elif [ "$CJK_TTY" != "false" ]; then
 else
   BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd"
 fi
-if [ "${CGO_COMPAT:-false}" = "true" ]; then
-  BASE_PACKAGES="$BASE_PACKAGES gcompat libc6-compat"
-fi
 PACKAGES="${PACKAGES:-$BASE_PACKAGES}"
 
 WORK="$(mktemp -d /tmp/alpine-build.XXXXXX)"
