@@ -30,7 +30,7 @@ const (
 	maxRetry     = 6
 	retryDelay   = 3 * time.Second
 	stallTimeout = 30 * time.Second
-	userAgent    = "aria2/1.37.0"
+	userAgent    = "app-runner/1.0"
 )
 
 // On-disk paths are variables so tests can redirect them to a temp directory;

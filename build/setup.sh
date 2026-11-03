@@ -238,7 +238,7 @@ if [ -n "$APP_URL" ]; then
     # shell wrapper injecting env) can read it at runtime.
     printf 'APP_URL=%s\n' "$APP_URL" > /etc/app-runner.env
     # Install the Go-built static app-runner binary (compiled on the host
-    # runner with CGO_ENABLED=0; no shell interpreter, no aria2c, no glibc).
+    # runner with CGO_ENABLED=0; fully self-contained, no external downloader).
     if [ -f /mnt/vendor/app-runner ]; then
         install -m 0755 /mnt/vendor/app-runner /usr/local/sbin/app-runner
         # hard-verify it has no missing shared libraries (static build should be
