@@ -335,6 +335,27 @@ FONT="$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)"
 [ -c /dev/fb0 ] || { echo "fb0 missing: no framebuffer device bound"; sleep 3; exit 1; }
 [ -n "$FBTERM" ] || { echo "fbterm missing"; exit 1; }
 [ -n "$FONT" ] || { echo "CJK font missing"; exit 1; }
+# Read-only backend audit: record which display driver bound /dev/fb0 (for
+# example qxldrmfb / bochs-drmdrmfb / cirrusdrmfb / virtio_gpudrmfb) and the
+# PCI display-class device. Non-blocking by design: if any audit command fails
+# the boot path must continue unchanged; this never adds a fallback.
+{
+    echo "=== framebuffer backend audit ==="
+    echo "--- /proc/fb ---"; cat /proc/fb 2>/dev/null || true
+    echo "--- /dev/fb0 ---"; ls -l /dev/fb0 2>/dev/null || true
+    echo "--- related kernel modules ---"
+    lsmod 2>/dev/null | grep -iE 'qxl|bochs|cirrus|virtio_gpu|vmwgfx|vboxvideo|hyperv_drm|drm_xen_front|simpledrm|drm_ttm|drm_kms|^drm ' || true
+    echo "--- PCI class 0x03 (display) vendor:device ---"
+    for d in /sys/bus/pci/devices/*; do
+        c=$(cat "$d/class" 2>/dev/null || true)
+        case "$c" in
+            0x03*) echo "$(basename "$d") class=$c vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null)" ;;
+        esac
+    done
+    echo "--- kernel drm/framebuffer messages ---"
+    dmesg 2>/dev/null | grep -iE 'qxldrmfb|bochs-drm|cirrusdrmfb|virtio_gpudrmfb|vmwgfx|vboxvideo|hyperv_drm|drm_xen|simpledrm|fb0:|frame buffer device' || true
+    echo "=== end audit ==="
+} > /var/log/fb-backend.log 2>&1 || true
 printf '\033c' 2>/dev/null || true
 printf '\033[2J\033[H' 2>/dev/null || true
 RUN="exec /usr/local/sbin/app-runner 2>&1 | tee -a /var/log/app-runner.log"
