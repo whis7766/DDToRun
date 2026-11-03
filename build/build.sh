@@ -6,12 +6,14 @@
 # extlinux bootloader, syslinux mbr.bin in sector 0) — the most compatible
 # layout for VPS reinstall scripts and legacy-BIOS providers.
 #
-# On first boot the root fs auto-grows to the whole disk; if APP_URL is set an
-# app-runner service (static Go binary) downloads and runs the business binary
-# on the VGA console (tty1) with Chinese (fbterm + wqy-zenhei).
+# On first boot the root fs auto-grows to the whole disk; an app-runner
+# service (static Go binary, download URL baked in) always downloads and runs
+# the business binary — on the VGA console (tty1) with Chinese (fbterm +
+# wqy-zenhei), or as a supervised service in headless SSH mode.
 #
 # Env (all optional):
-#   APP_URL        business binary URL (blank = no app-runner installed)
+#   APP_URL        business binary URL; blank uses the default baked into
+#                  app-runner.go, non-blank overrides it via -X at build time
 #   IMAGE_SIZE_GB  image size in GB (default 1)
 #   ALPINE_MIRROR  apk mirror (default https://dl-cdn.alpinelinux.org/alpine)
 #   ALPINE_BRANCH  alpine branch (default v3.22)
