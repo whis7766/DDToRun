@@ -108,13 +108,27 @@ for try in 1 2 3; do
   /usr/bin/sleep 1
 done
 [ -n "$LOOP_DEV" ] || { echo "losetup failed"; exit 1; }
-# one bootable Linux partition filling the disk (starts at 1MiB for alignment)
-sfdisk "$LOOP_DEV" >/dev/null <<EOF
+# one bootable Linux partition filling the disk (starts at 1MiB for alignment).
+# Loop backends reject the BLKRRPART ioctl with EINVAL, which sfdisk reports as
+# "Re-reading the partition table failed". --no-reread skips the in-use check
+# ioctl and --no-tell-kernel skips notifying the kernel after the write; the
+# partition node is instead created below via partx, with a --partscan
+# re-attach as the fallback.
+sfdisk --no-reread --no-tell-kernel "$LOOP_DEV" >/dev/null <<EOF || { echo "sfdisk partition table write failed"; exit 1; }
 label: dos
 2048,,L,*
 EOF
 partx -a "$LOOP_DEV" 2>/dev/null || true
 PART_DEV="${LOOP_DEV}p1"
+# Fallback: if the loop backend did not expose p1 after partx, detach and
+# re-attach with --partscan so the kernel scans the table at bind time.
+if [ ! -b "$PART_DEV" ]; then
+  partx -d "$LOOP_DEV" 2>/dev/null || true
+  losetup -d "$LOOP_DEV" 2>/dev/null || true
+  /usr/bin/sleep 1
+  LOOP_DEV=$(losetup --find --show --partscan "$IMG") || { echo "partscan re-attach failed"; exit 1; }
+  PART_DEV="${LOOP_DEV}p1"
+fi
 [ -b "$PART_DEV" ] || { echo "partition $PART_DEV not found"; exit 1; }
 cleanup_loop() { partx -d "$LOOP_DEV" 2>/dev/null || true; losetup -d "$LOOP_DEV" 2>/dev/null || true; }
 trap cleanup_loop EXIT
