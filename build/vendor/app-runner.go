@@ -236,9 +236,11 @@ func prepareBeforeExec() {
 }
 
 func execApp() error {
-	// Start the business program with a bare argv[0]; do not forward any
-	// launcher arguments to it.
-	return syscall.Exec(appPath, []string{appPath}, os.Environ())
+	// Bare argv[0], no forwarded launcher arguments, and a minimal clean
+	// environment: do not inherit the launcher's own variables such as
+	// APP_URL or APP_RUNNER_LOG_STDOUT_ONLY into the business program.
+	env := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	return syscall.Exec(appPath, []string{appPath}, env)
 }
 
 func openLog() io.Writer {
