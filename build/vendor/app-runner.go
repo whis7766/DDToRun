@@ -3,9 +3,10 @@
 // Runs on bare Alpine (musl, no glibc), downloaded from APP_URL once per boot,
 // kept locally on failure, exec'd directly (syscall.Exec).
 //
-// If the server supports HTTP Range, downloads in parallel chunks; otherwise
-// falls back to a single stream with stall detection. A stalled chunk aborts
-// that request so the outer retry loop can restart cleanly.
+// Single-stream GET only: no Range probing, no chunked/parallel download, which
+// keeps behavior compatible with plain HTTP/1.1 servers, CDNs and short links.
+// A single stall watchdog aborts a request that stops producing data so the
+// fixed-delay retry loop can restart cleanly.
 package main
 
 import (
@@ -18,9 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -29,7 +28,7 @@ import (
 const (
 	logPath      = "/var/log/app-runner.log"
 	maxRetry     = 6
-	numWorkers   = 4
+	retryDelay   = 3 * time.Second
 	stallTimeout = 30 * time.Second
 	userAgent    = "aria2/1.37.0"
 )
@@ -50,46 +49,18 @@ func haveApp() bool {
 	return err == nil && fi.Size() > 0
 }
 
-// backoff grows with the attempt and is capped so a long network outage does
-// not hammer the server or flood the log.
-func backoff(attempt int) time.Duration {
-	d := time.Duration(1<<(attempt-1)) * time.Second
-	if d > 15*time.Second {
-		d = 15 * time.Second
-	}
-	return d
-}
-
+// newClient keeps the transport minimal for maximum compatibility: it follows
+// redirects by default, uses plain GET, sends no Range header, and does not
+// pin concurrency limits or socket buffers.
 func newClient() *http.Client {
-	dialer := &net.Dialer{
-		Timeout:   15 * time.Second,
-		KeepAlive: 30 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			// TCP_NODELAY + explicit socket buffers (kernel autotune may be
-			// conservative on a fresh Alpine with no sysctl tuning).
-			return c.Control(func(fd uintptr) {
-				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4<<20)
-				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, 4<<20)
-			})
-		},
-	}
 	transport := &http.Transport{
-		MaxIdleConns:          numWorkers,
-		MaxConnsPerHost:       numWorkers,
-		IdleConnTimeout:       30 * time.Second,
-		DialContext:           dialer.DialContext,
-		ReadBufferSize:        4 << 20,
-		WriteBufferSize:       4 << 20,
+		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
-		DisableCompression:    true, // binary, no gzip
+		IdleConnTimeout:       30 * time.Second,
+		DisableCompression:    true, // binary artifact; keep bytes as-is
 		ExpectContinueTimeout: 1 * time.Second,
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		},
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 	}
-	// No client.Timeout: never abort an in-progress download as a whole.
-	// Request context + per-chunk/stream stall watchdog abort a stalled request.
 	return &http.Client{Transport: transport}
 }
 
@@ -104,19 +75,19 @@ func fetch() bool {
 	for attempt := 1; attempt <= maxRetry; attempt++ {
 		log.Printf("fetch attempt %d/%d: %s", attempt, maxRetry, url)
 		ctx, cancel := context.WithCancel(context.Background())
-		err := downloadOnce(ctx, url)
+		err := downloadFile(ctx, url)
 		cancel()
 		if err != nil {
 			log.Printf("download failed: %v", err)
 			status("download failed (%d/%d): %v", attempt, maxRetry, err)
 			os.Remove(tmpPath)
-			time.Sleep(backoff(attempt))
+			time.Sleep(retryDelay)
 			continue
 		}
 		if err := os.Rename(tmpPath, appPath); err != nil {
 			log.Printf("rename failed: %v", err)
 			os.Remove(tmpPath)
-			time.Sleep(backoff(attempt))
+			time.Sleep(retryDelay)
 			continue
 		}
 		os.Chmod(appPath, 0755)
@@ -134,50 +105,21 @@ func fetch() bool {
 	return false
 }
 
-func downloadOnce(ctx context.Context, url string) error {
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+// downloadFile fetches the whole artifact in one GET request and writes it to
+// tmpPath. No Range header, no parallelism.
+func downloadFile(ctx context.Context, url string) error {
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	client := newClient()
-
-	// Probe: ask for the first byte to check Range support + total size.
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Range", "bytes=0-0")
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	total := int64(-1)
-	supportsRange := resp.StatusCode == http.StatusPartialContent
-	if supportsRange {
-		if cr := resp.Header.Get("Content-Range"); cr != "" {
-			if idx := strings.LastIndex(cr, "/"); idx >= 0 {
-				if n, perr := strconv.ParseInt(cr[idx+1:], 10, 64); perr == nil {
-					total = n
-				}
-			}
-		}
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-
-	if supportsRange && total > 65536 {
-		return downloadParallel(ctx, client, f, url, total)
-	}
-	return downloadSingle(ctx, client, f, url)
-}
-
-// downloadSingle downloads the whole body in one stream with stall detection.
-func downloadSingle(ctx context.Context, client *http.Client, f *os.File, url string) error {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(cctx, "GET", url, nil)
+
+	req, _ := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
 	req.Header.Set("User-Agent", userAgent)
-	resp, err := client.Do(req)
+	resp, err := newClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -205,8 +147,7 @@ func downloadSingle(ctx context.Context, client *http.Client, f *os.File, url st
 		fmt.Println()
 	}()
 
-	_, err = io.CopyBuffer(f, io.TeeReader(stallRd, pw), make([]byte, 1<<20))
-	if err != nil {
+	if _, err := io.CopyBuffer(f, io.TeeReader(stallRd, pw), make([]byte, 1<<16)); err != nil {
 		return err
 	}
 	if fi, statErr := f.Stat(); statErr == nil && resp.ContentLength > 0 && fi.Size() != resp.ContentLength {
@@ -215,6 +156,8 @@ func downloadSingle(ctx context.Context, client *http.Client, f *os.File, url st
 	return nil
 }
 
+// stallReader resets the watchdog whenever a chunk of bytes arrives; silence
+// past stallTimeout cancels the request.
 type stallReader struct {
 	r     io.Reader
 	reset func(time.Duration) bool
@@ -226,136 +169,6 @@ func (s *stallReader) Read(b []byte) (int, error) {
 		s.reset(stallTimeout)
 	}
 	return n, err
-}
-
-func downloadParallel(ctx context.Context, client *http.Client, f *os.File, url string, total int64) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	var downloaded atomic.Int64
-	var wg sync.WaitGroup
-	errCh := make(chan error, numWorkers)
-	chunk := total / int64(numWorkers)
-
-	for i := 0; i < numWorkers; i++ {
-		start := int64(i) * chunk
-		end := total - 1
-		if i < numWorkers-1 {
-			end = start + chunk - 1
-		}
-		wg.Add(1)
-		go func(start, end int64) {
-			defer wg.Done()
-			if e := fetchChunk(ctx, client, f, url, start, end, &downloaded); e != nil {
-				select {
-				case errCh <- e:
-				default:
-				}
-				cancel() // stop the remaining chunks on the first failure
-			}
-		}(start, end)
-	}
-
-	stopProgress := runParallelProgress(&downloaded, total)
-	wg.Wait()
-	stopProgress()
-
-	// Report a chunk error before the size check so it cannot be masked.
-	select {
-	case e := <-errCh:
-		return e
-	default:
-	}
-
-	fi, statErr := f.Stat()
-	if statErr != nil {
-		return statErr
-	}
-	if fi.Size() != total {
-		return fmt.Errorf("size mismatch after parallel download: got %d want %d", fi.Size(), total)
-	}
-	return nil
-}
-
-func fetchChunk(ctx context.Context, client *http.Client, f *os.File, url string, start, end int64, downloaded *atomic.Int64) error {
-	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		cctx, cancel := context.WithCancel(ctx)
-		timer := time.NewTimer(stallTimeout)
-		go func() {
-			select {
-			case <-timer.C:
-				cancel()
-			case <-cctx.Done():
-			}
-		}()
-
-		req, _ := http.NewRequestWithContext(cctx, "GET", url, nil)
-		req.Header.Set("User-Agent", userAgent)
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-		resp, err := client.Do(req)
-		if err != nil {
-			timer.Stop()
-			cancel()
-			respBodyClose(resp)
-			lastErr = err
-			time.Sleep(time.Duration(attempt) * time.Second)
-			continue
-		}
-		if resp.StatusCode != http.StatusPartialContent {
-			timer.Stop()
-			cancel()
-			resp.Body.Close()
-			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-			time.Sleep(time.Duration(attempt) * time.Second)
-			continue
-		}
-		stallRd := &stallReader{r: resp.Body, reset: timer.Reset}
-		buf := make([]byte, 1<<20)
-		written, err := copyAt(f, stallRd, start, buf)
-		timer.Stop()
-		cancel()
-		resp.Body.Close()
-		if err == nil {
-			downloaded.Add(written)
-			return nil
-		}
-		lastErr = err
-		time.Sleep(time.Duration(attempt) * time.Second)
-	}
-	return lastErr
-}
-
-func respBodyClose(resp *http.Response) {
-	if resp != nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-	}
-}
-
-func copyAt(f *os.File, r io.Reader, off int64, buf []byte) (int64, error) {
-	total := int64(0)
-	for {
-		nr, er := r.Read(buf)
-		if nr > 0 {
-			nw, ew := f.WriteAt(buf[0:nr], off)
-			off += int64(nw)
-			total += int64(nw)
-			if ew != nil {
-				return total, ew
-			}
-		}
-		if er == io.EOF {
-			break
-		}
-		if er != nil {
-			return total, er
-		}
-	}
-	return total, nil
 }
 
 type progressWriter struct {
@@ -404,38 +217,6 @@ func (p *progressWriter) Run(done <-chan struct{}) {
 	}
 }
 
-// runParallelProgress prints overall transfer progress; the returned stop
-// function closes the ticker goroutine and finishes the progress line.
-func runParallelProgress(downloaded *atomic.Int64, total int64) func() {
-	done := make(chan struct{})
-	var lastBytes atomic.Int64
-	lastTime := time.Now()
-	go func() {
-		t := time.NewTicker(500 * time.Millisecond)
-		defer t.Stop()
-		for {
-			select {
-			case <-t.C:
-				now := time.Now()
-				d := downloaded.Load()
-				old := lastBytes.Swap(d)
-				speed := float64(d-old) / now.Sub(lastTime).Seconds() / 1048576.0
-				lastTime = now
-				if total > 0 {
-					fmt.Printf("\r[app-runner] download %3d%% %5.1f/%5.1fMB %4.1fMB/s ",
-						d*100/total, float64(d)/1048576.0, float64(total)/1048576.0, speed)
-				}
-			case <-done:
-				return
-			}
-		}
-	}()
-	return func() {
-		close(done)
-		fmt.Println()
-	}
-}
-
 func stdoutIsTerminal() bool {
 	st, err := os.Stdout.Stat()
 	if err != nil {
@@ -463,7 +244,7 @@ func openLog() io.Writer {
 	if os.Getenv("APP_RUNNER_LOG_STDOUT_ONLY") == "1" {
 		return os.Stdout
 	}
-	lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return os.Stdout
 	}
