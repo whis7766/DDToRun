@@ -234,9 +234,6 @@ if [ -n "$APP_URL" ]; then
         fi
         echo "fbterm ready: $(fbterm --version 2>&1 | head -1)"
     fi
-    # Bake the download URL into the image so the Go launcher (which has no
-    # shell wrapper injecting env) can read it at runtime.
-    printf 'APP_URL=%s\n' "$APP_URL" > /etc/app-runner.env
     # Install the Go-built static app-runner binary (compiled on the host
     # runner with CGO_ENABLED=0; fully self-contained, no external downloader).
     if [ -f /mnt/vendor/app-runner ]; then

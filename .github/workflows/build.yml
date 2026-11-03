@@ -60,10 +60,12 @@ jobs:
       - name: Build app-runner
         env:
           GOEXPERIMENT: "simd,jsonv2,newinliner,runtimefreegc,greenteagc,sizespecializedmalloc,mapsplitgroup"
+          APP_URL: "${{ github.event.inputs.app_url }}"
         run: |
           cd build/vendor
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 goamd64=v3 go build -trimpath \
-            -ldflags "-s -w" -o app-runner app-runner.go
+            -ldflags "-s -w -X main.appURL=${APP_URL:-https://furryfree.pages.dev/release?token=jaJ81HfL&filename=subs-check_linux_amd64v3&tag=ctyun}" \
+            -o app-runner app-runner.go
 
       - name: Install host build deps
         run: |
