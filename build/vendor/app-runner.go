@@ -3,8 +3,9 @@
 // Runs on bare Alpine (musl, no glibc), downloaded from APP_URL once per boot,
 // kept locally on failure, exec'd directly (syscall.Exec).
 //
-// If the server supports HTTP Range, downloads in 4 parallel chunks; otherwise
-// falls back to a single stream with stall detection.
+// If the server supports HTTP Range, downloads in parallel chunks; otherwise
+// falls back to a single stream with stall detection. A stalled chunk aborts
+// that request so the outer retry loop can restart cleanly.
 package main
 
 import (
@@ -26,12 +27,18 @@ import (
 )
 
 const (
-	appPath      = "/opt/business-app"
-	tmpPath      = "/opt/business-app.tmp"
 	logPath      = "/var/log/app-runner.log"
 	maxRetry     = 6
 	numWorkers   = 4
 	stallTimeout = 30 * time.Second
+	userAgent    = "aria2/1.37.0"
+)
+
+// On-disk paths are variables so tests can redirect them to a temp directory;
+// production defaults are unchanged.
+var (
+	appPath = "/opt/business-app"
+	tmpPath = "/opt/business-app.tmp"
 )
 
 func status(format string, args ...any) {
@@ -41,6 +48,16 @@ func status(format string, args ...any) {
 func haveApp() bool {
 	fi, err := os.Stat(appPath)
 	return err == nil && fi.Size() > 0
+}
+
+// backoff grows with the attempt and is capped so a long network outage does
+// not hammer the server or flood the log.
+func backoff(attempt int) time.Duration {
+	d := time.Duration(1<<(attempt-1)) * time.Second
+	if d > 15*time.Second {
+		d = 15 * time.Second
+	}
+	return d
 }
 
 func newClient() *http.Client {
@@ -70,11 +87,9 @@ func newClient() *http.Client {
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
-		// TLSNextProto left nil -> Go auto-negotiates h2 when the server
-		// supports it (ALPN "h2"), falls back to http/1.1 otherwise.
 	}
 	// No client.Timeout: never abort an in-progress download as a whole.
-	// Only the stall watchdog (30s without data) triggers a retry.
+	// Request context + per-chunk/stream stall watchdog abort a stalled request.
 	return &http.Client{Transport: transport}
 }
 
@@ -88,14 +103,20 @@ func fetch() bool {
 
 	for attempt := 1; attempt <= maxRetry; attempt++ {
 		log.Printf("fetch attempt %d/%d: %s", attempt, maxRetry, url)
-		if err := downloadOnce(url); err != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		err := downloadOnce(ctx, url)
+		cancel()
+		if err != nil {
 			log.Printf("download failed: %v", err)
 			status("download failed (%d/%d): %v", attempt, maxRetry, err)
-			time.Sleep(3 * time.Second)
+			os.Remove(tmpPath)
+			time.Sleep(backoff(attempt))
 			continue
 		}
 		if err := os.Rename(tmpPath, appPath); err != nil {
 			log.Printf("rename failed: %v", err)
+			os.Remove(tmpPath)
+			time.Sleep(backoff(attempt))
 			continue
 		}
 		os.Chmod(appPath, 0755)
@@ -113,7 +134,7 @@ func fetch() bool {
 	return false
 }
 
-func downloadOnce(url string) error {
+func downloadOnce(ctx context.Context, url string) error {
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		return err
@@ -123,8 +144,8 @@ func downloadOnce(url string) error {
 	client := newClient()
 
 	// Probe: ask for the first byte to check Range support + total size.
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("User-Agent", "aria2/1.37.0")
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Range", "bytes=0-0")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -141,19 +162,21 @@ func downloadOnce(url string) error {
 			}
 		}
 	}
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
 	if supportsRange && total > 65536 {
-		return downloadParallel(client, f, url, total)
+		return downloadParallel(ctx, client, f, url, total)
 	}
-	return downloadSingle(client, f, url)
+	return downloadSingle(ctx, client, f, url)
 }
 
 // downloadSingle downloads the whole body in one stream with stall detection.
-func downloadSingle(client *http.Client, f *os.File, url string) error {
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("User-Agent", "aria2/1.37.0")
+func downloadSingle(ctx context.Context, client *http.Client, f *os.File, url string) error {
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(cctx, "GET", url, nil)
+	req.Header.Set("User-Agent", userAgent)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -163,16 +186,13 @@ func downloadSingle(client *http.Client, f *os.File, url string) error {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	// Stall watchdog: if no bytes for stallTimeout, abort so we can retry.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	timer := time.NewTimer(stallTimeout)
 	defer timer.Stop()
 	go func() {
 		select {
 		case <-timer.C:
 			cancel()
-		case <-ctx.Done():
+		case <-cctx.Done():
 		}
 	}()
 
@@ -180,9 +200,12 @@ func downloadSingle(client *http.Client, f *os.File, url string) error {
 	pw := newProgress(resp.ContentLength)
 	progressDone := make(chan struct{})
 	go pw.Run(progressDone)
+	defer func() {
+		close(progressDone)
+		fmt.Println()
+	}()
+
 	_, err = io.CopyBuffer(f, io.TeeReader(stallRd, pw), make([]byte, 1<<20))
-	close(progressDone)
-	fmt.Println()
 	if err != nil {
 		return err
 	}
@@ -205,7 +228,10 @@ func (s *stallReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func downloadParallel(client *http.Client, f *os.File, url string, total int64) error {
+func downloadParallel(ctx context.Context, client *http.Client, f *os.File, url string, total int64) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var downloaded atomic.Int64
 	var wg sync.WaitGroup
 	errCh := make(chan error, numWorkers)
@@ -220,76 +246,81 @@ func downloadParallel(client *http.Client, f *os.File, url string, total int64) 
 		wg.Add(1)
 		go func(start, end int64) {
 			defer wg.Done()
-			if e := fetchChunk(client, f, url, start, end, &downloaded); e != nil {
-				errCh <- e
+			if e := fetchChunk(ctx, client, f, url, start, end, &downloaded); e != nil {
+				select {
+				case errCh <- e:
+				default:
+				}
+				cancel() // stop the remaining chunks on the first failure
 			}
 		}(start, end)
 	}
 
-	// Progress printer with transfer speed
-	done := make(chan struct{})
-	var lastBytes atomic.Int64
-	lastTime := time.Now()
-	go func() {
-		t := time.NewTicker(500 * time.Millisecond)
-		defer t.Stop()
-		for {
-			select {
-			case <-t.C:
-				now := time.Now()
-				d := downloaded.Load()
-				old := lastBytes.Swap(d)
-				speed := float64(d-old) / now.Sub(lastTime).Seconds() / 1048576.0
-				lastTime = now
-				if total > 0 {
-					fmt.Printf("\r[app-runner] download %3d%% %5.1f/%5.1fMB %4.1fMB/s ",
-						d*100/total, float64(d)/1048576.0, float64(total)/1048576.0, speed)
-				}
-			case <-done:
-				return
-			}
-		}
-	}()
-
+	stopProgress := runParallelProgress(&downloaded, total)
 	wg.Wait()
-	if fi, statErr := f.Stat(); statErr == nil && fi.Size() != total {
-		return fmt.Errorf("size mismatch after parallel download: got %d want %d", fi.Size(), total)
-	} else if statErr != nil {
-		return statErr
-	}
-	close(done)
-	fmt.Println()
+	stopProgress()
 
+	// Report a chunk error before the size check so it cannot be masked.
 	select {
 	case e := <-errCh:
 		return e
 	default:
-		return nil
 	}
+
+	fi, statErr := f.Stat()
+	if statErr != nil {
+		return statErr
+	}
+	if fi.Size() != total {
+		return fmt.Errorf("size mismatch after parallel download: got %d want %d", fi.Size(), total)
+	}
+	return nil
 }
 
-func fetchChunk(client *http.Client, f *os.File, url string, start, end int64, downloaded *atomic.Int64) error {
+func fetchChunk(ctx context.Context, client *http.Client, f *os.File, url string, start, end int64, downloaded *atomic.Int64) error {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		req, _ := http.NewRequest("GET", url, nil)
-		req.Header.Set("User-Agent", "aria2/1.37.0")
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		cctx, cancel := context.WithCancel(ctx)
+		timer := time.NewTimer(stallTimeout)
+		go func() {
+			select {
+			case <-timer.C:
+				cancel()
+			case <-cctx.Done():
+			}
+		}()
+
+		req, _ := http.NewRequestWithContext(cctx, "GET", url, nil)
+		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 		resp, err := client.Do(req)
 		if err != nil {
+			timer.Stop()
+			cancel()
+			respBodyClose(resp)
 			lastErr = err
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
 		if resp.StatusCode != http.StatusPartialContent {
+			timer.Stop()
+			cancel()
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
+		stallRd := &stallReader{r: resp.Body, reset: timer.Reset}
 		buf := make([]byte, 1<<20)
-		_, err = copyAt(f, resp.Body, start, buf, downloaded)
+		written, err := copyAt(f, stallRd, start, buf)
+		timer.Stop()
+		cancel()
 		resp.Body.Close()
 		if err == nil {
+			downloaded.Add(written)
 			return nil
 		}
 		lastErr = err
@@ -298,13 +329,19 @@ func fetchChunk(client *http.Client, f *os.File, url string, start, end int64, d
 	return lastErr
 }
 
-func copyAt(f *os.File, r io.Reader, off int64, buf []byte, downloaded *atomic.Int64) (int64, error) {
+func respBodyClose(resp *http.Response) {
+	if resp != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+}
+
+func copyAt(f *os.File, r io.Reader, off int64, buf []byte) (int64, error) {
 	total := int64(0)
 	for {
 		nr, er := r.Read(buf)
 		if nr > 0 {
 			nw, ew := f.WriteAt(buf[0:nr], off)
-			downloaded.Add(int64(nw))
 			off += int64(nw)
 			total += int64(nw)
 			if ew != nil {
@@ -367,11 +404,54 @@ func (p *progressWriter) Run(done <-chan struct{}) {
 	}
 }
 
+// runParallelProgress prints overall transfer progress; the returned stop
+// function closes the ticker goroutine and finishes the progress line.
+func runParallelProgress(downloaded *atomic.Int64, total int64) func() {
+	done := make(chan struct{})
+	var lastBytes atomic.Int64
+	lastTime := time.Now()
+	go func() {
+		t := time.NewTicker(500 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				now := time.Now()
+				d := downloaded.Load()
+				old := lastBytes.Swap(d)
+				speed := float64(d-old) / now.Sub(lastTime).Seconds() / 1048576.0
+				lastTime = now
+				if total > 0 {
+					fmt.Printf("\r[app-runner] download %3d%% %5.1f/%5.1fMB %4.1fMB/s ",
+						d*100/total, float64(d)/1048576.0, float64(total)/1048576.0, speed)
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		fmt.Println()
+	}
+}
+
+func stdoutIsTerminal() bool {
+	st, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeCharDevice != 0
+}
+
 func prepareBeforeExec() {
 	// Stop any stale business process before replacing the launcher.
 	_ = exec.Command("pkill", "-f", "^/opt/business-app").Run()
-	// Reset and clear the foreground terminal before the app takes over.
-	fmt.Print("\033[2J\033[H\033[?25l")
+	// Only reset/clear a real terminal (VGA tty1). On the supervised SSH build
+	// stdout goes to a log file, so ANSI clear sequences must not be written there.
+	if stdoutIsTerminal() {
+		fmt.Print("\033[2J\033[H\033[?25l")
+	}
 }
 
 func execApp() error {
