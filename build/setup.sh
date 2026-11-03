@@ -185,8 +185,10 @@ fi
 # build flow) + the official font-wqy-zenhei package. If no framebuffer/font
 # The default VGA kiosk uses fbterm on tty1 for CJK text. No plain VGA tty
 # fallback: a required display component failure fails the image build early.
-if [ -n "$APP_URL" ]; then
-    mkdir -p /opt /usr/local/sbin /var/log
+# The business URL is baked into the app-runner binary (default value, or an
+# -X main.appURL override at build time), so the app-runner service is always
+# installed and runs on every boot; APP_URL is no longer a switch.
+mkdir -p /opt /usr/local/sbin /var/log
     # --- compile fbterm natively (musl) for Chinese on the VGA console ----
     # Alpine ships no fbterm package; build from upstream source in the chroot
     # with the official toolchain, then drop the dev packages again.
@@ -316,7 +318,6 @@ EOF
         sed -i 's|^#\?tty1::respawn:.*|tty1::respawn:/usr/local/sbin/app-runner-fb.sh|' /etc/inittab
         grep -q '^tty1::respawn:' /etc/inittab || echo 'tty1::respawn:/usr/local/sbin/app-runner-fb.sh' >> /etc/inittab
     fi
-fi
 
 # --- explicit boot modules ------------------------------------------------
 # Declare required modules explicitly; do not prune the kernel module tree
