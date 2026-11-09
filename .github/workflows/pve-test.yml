@@ -1,0 +1,77 @@
+name: PVE Real-Machine Boot Test
+
+# Customer-specific end-to-end test against the multi-tenant Proxmox VE host.
+# It imports a release image through the PVE 9 `import-from` channel, boots a VM
+# with a chosen display adapter / disk bus, and captures the screen over an SSH
+# VNC tunnel. All host credentials come from repository secrets - nothing is
+# hard-coded here, and this workflow never alters the production image build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag whose asset is imported"
+        required: true
+        default: "dd"
+        type: string
+      asset:
+        description: "Release asset (vpsvga / vpsssh)"
+        required: true
+        default: "vpsvga"
+        type: string
+      vga:
+        description: "Display adapter to simulate (qxl/std/cirrus/virtio/vmware/none)"
+        required: true
+        default: "qxl"
+        type: string
+      disk_bus:
+        description: "Disk bus (scsi = virtio-scsi, virtio = virtio-blk)"
+        required: true
+        default: "scsi"
+        type: string
+      memory_mb:
+        description: "Guest memory in MB"
+        required: true
+        default: "512"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  pve-boot:
+    name: PVE boot (${{ inputs.vga }} / ${{ inputs.disk_bus }})
+    runs-on: ubuntu-latest
+    env:
+      PVE_HOST: ${{ secrets.PVE_HOST }}
+      PVE_API_PORT: ${{ secrets.PVE_API_PORT }}
+      PVE_SSH_PORT: ${{ secrets.PVE_SSH_PORT }}
+      PVE_USER: ${{ secrets.PVE_USER }}
+      PVE_API_PASS: ${{ secrets.PVE_API_PASS }}
+      PVE_SSH_PASS: ${{ secrets.PVE_SSH_PASS }}
+      PVE_TLS_FP: ${{ secrets.PVE_TLS_FP }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Python tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet paramiko requests zstandard vncdotool
+
+      - name: Download and import release asset, boot and capture screen
+        run: |
+          python .github/pve/pve-e2e.py \
+            --tag "${{ inputs.release_tag }}" \
+            --asset "${{ inputs.asset }}" \
+            --vga "${{ inputs.vga }}" \
+            --disk-bus "${{ inputs.disk_bus }}" \
+            --memory "${{ inputs.memory_mb }}"
+
+      - name: Upload screen capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pve-screen-${{ inputs.vga }}-${{ inputs.disk_bus }}
+          path: .github/pve/out/
+          retention-days: 14
