@@ -16,3 +16,6 @@ build/vendor/ssh_user_key
 *.swp
 *.swo
 *~
+
+# Local PVE credentials (never commit)
+.pve/

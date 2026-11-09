@@ -406,7 +406,9 @@ if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
     # Omit console/serial drivers (virtio_console/hvc) and test emulation
     # modules (sch_netem): this production appliance has no serial console and
     # never injects delay/loss for testing; nothing kept depends on them.
-    SEEDS="virtio virtio_ring virtio_pci virtio_mmio virtio_blk virtio_net virtio_rng virtio_balloon e1000 e1000e tun sch_fq tcp_bbr ext4 jbd2 mbcache crc32c_intel crc32c_generic crc16 crc32_generic rng_core net_failover failover af_packet"
+    # virtio_scsi + sd_mod cover virtio-scsi root disks (scsi0); the SCSI core
+    # (scsi_mod) is built into the linux-virt kernel, so it needs no seed.
+    SEEDS="virtio virtio_ring virtio_pci virtio_mmio virtio_blk virtio_scsi sd_mod virtio_net virtio_rng virtio_balloon e1000 e1000e tun sch_fq tcp_bbr ext4 jbd2 mbcache crc32c_intel crc32c_generic crc16 crc32_generic rng_core net_failover failover af_packet"
     if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
         # VGA kiosk needs the framebuffer + drm chain (fbterm -> /dev/fb0).
         # Include the common cloud hypervisor display drivers; dependency closure
@@ -454,10 +456,10 @@ if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
     find "$MROOT/kernel" -type d -empty -delete 2>/dev/null
     rm -f "$KEEPFILE"
     echo "  kept $(find "$MROOT/kernel" -name '*.ko*' 2>/dev/null | wc -l) kernel modules"
-    # drop scsi from mkinitfs features and rebuild the initramfs from the tree
-    if [ -f /etc/mkinitfs/mkinitfs.conf ]; then
-        sed -i 's/scsi //g; s/  */ /g' /etc/mkinitfs/mkinitfs.conf
-    fi
+    # Keep the scsi mkinitfs feature: instances may boot from a virtio-scsi
+    # disk (scsi0), whose virtio_scsi/sd_mod stack must be present in the
+    # initramfs or the root UUID cannot be resolved. The initramfs is rebuilt
+    # below from the trimmed module tree, which now retains those drivers.
     if command -v mkinitfs >/dev/null 2>&1; then
         if ! mkinitfs -o /boot/initramfs-virt "$KVER" >/dev/null 2>&1; then
             echo "  WARN: mkinitfs rebuild failed; keeping original initramfs"
