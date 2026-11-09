@@ -19,3 +19,7 @@ build/vendor/ssh_user_key
 
 # Local PVE credentials (never commit)
 .pve/
+
+# Python bytecode
+__pycache__/
+*.pyc
