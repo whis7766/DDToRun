@@ -81,7 +81,19 @@ jobs:
           HEADLESS_SSH: "${{ matrix.profile.headless_ssh }}"
           CJK_TTY: "${{ matrix.profile.cjk_tty }}"
         run: |
-          sudo -E bash build/build.sh
+          # Do not rely on `sudo -E`: newer sudo builds reject preserving the
+          # whole environment ("'-E' is ignored"), which would silently drop
+          # every variable and make build.sh fall back to the VGA profile. Pass
+          # the inputs explicitly through `env`, which works regardless of the
+          # sudo environment policy.
+          sudo env \
+            APP_URL="$APP_URL" \
+            IMAGE_SIZE_GB="$IMAGE_SIZE_GB" \
+            ALPINE_BRANCH="$ALPINE_BRANCH" \
+            CGO_COMPAT="$CGO_COMPAT" \
+            HEADLESS_SSH="$HEADLESS_SSH" \
+            CJK_TTY="$CJK_TTY" \
+            bash build/build.sh
 
       - name: Compress to ${{ matrix.profile.asset }}
         run: |
