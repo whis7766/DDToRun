@@ -101,7 +101,9 @@ jobs:
           sudo chown -R "$(id -un):$(id -gn)" .
           RAW="vps-app-runner.img.raw"
           OUT="${{ matrix.profile.asset }}"
-          zstd -q -22 --ultra --long=27 -f "$RAW" -o "$OUT"
+          # -19 gives virtually the same ratio as -22 --ultra but finishes in
+          # roughly half the wall time; keep the large window for the 1GB raw.
+          zstd -q -19 --long=27 -f "$RAW" -o "$OUT"
           sha256sum "$OUT" | tee "$OUT.sha256"
           ls -lh "$OUT"
           stat -c '%n %s bytes' "$OUT"
