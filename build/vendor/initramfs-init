@@ -1,0 +1,89 @@
+#!/bin/sh
+# Minimal initramfs init.
+#
+# The stock Alpine init hands off to nlplug-findfs, which is built against
+# libcryptsetup; lddtree therefore pulls the whole OpenSSL/dm stack into the
+# initramfs (libcrypto + libssl + libcryptsetup + libdevmapper), even though
+# this appliance never uses encrypted or LVM roots. The stock base feature also
+# ships /sbin/apk, which independently drags libcrypto back in.
+#
+# This replacement keeps the exact same boot contract - resolve the root
+# device, mount it read-only, switch_root - using only busybox + mdev + kmod,
+# so the entire crypto closure can be dropped. Device discovery is done by
+# replaying the kernel device tree (mdev -s); mdev.conf modprobes each
+# MODALIAS, which is the same coldplug mechanism Alpine uses for diskless boot.
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+/bin/busybox --install -s
+
+# --- core virtual filesystems ---------------------------------------------
+[ -c /dev/null ] || mknod -m 666 /dev/null c 1 3
+mount -t sysfs -o noexec,nosuid,nodev sysfs /sys
+mount -t devtmpfs -o exec,nosuid,mode=0755 devtmpfs /dev 2>/dev/null \
+    || mount -t tmpfs -o exec,nosuid,mode=0755 tmpfs /dev
+[ -c /dev/kmsg ] || mknod -m 660 /dev/kmsg c 1 11
+mount -t proc -o noexec,nosuid,nodev proc /proc
+mkdir -p /dev/pts
+mount -t devpts -o gid=5,mode=0620,noexec,nosuid devpts /dev/pts
+mkdir -p /dev/shm
+mount -t tmpfs -o nodev,nosuid,noexec shm /dev/shm
+
+# --- parse the kernel command line ----------------------------------------
+for opt in $(cat /proc/cmdline); do
+    case "$opt" in
+        root=*)       KOPT_root="${opt#root=}";;
+        rootflags=*)  KOPT_rootflags="${opt#rootflags=}";;
+        rootfstype=*) KOPT_rootfstype="${opt#rootfstype=}";;
+        modules=*)    KOPT_modules="${opt#modules=}";;
+        init=*)       KOPT_init="${opt#init=}";;
+    esac
+done
+
+# --- coldplug: mdev as hotplug helper, explicit modules, then replay /sys --
+echo /sbin/mdev > /proc/sys/kernel/hotplug
+# Explicitly load the cmdline modules (ext4) and loop; mdev -s below covers the
+# storage/net/drm drivers from their MODALIAS entries.
+modprobe -a $(echo "$KOPT_modules" | tr ',' ' ') loop 2>/dev/null
+mdev -s
+
+# --- resolve the root device, waiting for the block device to appear ------
+case "$KOPT_root" in
+    UUID=*|LABEL=*) root_dev="";;
+    *)              root_dev="$KOPT_root";;
+esac
+i=0
+while [ $i -lt 150 ]; do
+    if [ -z "$root_dev" ]; then
+        root_dev="$(findfs "$KOPT_root" 2>/dev/null)"
+    fi
+    if [ -n "$root_dev" ] && [ -b "$root_dev" ]; then
+        break
+    fi
+    sleep 0.2
+    i=$((i + 1))
+done
+
+if [ -z "$root_dev" ] || [ ! -b "$root_dev" ]; then
+    echo "initramfs: root device '$KOPT_root' not found" > /dev/kmsg
+    echo "emergency recovery shell. Type 'exit' to retry."
+    /bin/busybox sh
+fi
+
+# --- mount the real root read-only ----------------------------------------
+mkdir -p /sysroot
+if ! mount ${KOPT_rootfstype:+-t "$KOPT_rootfstype"} \
+        -o "${KOPT_rootflags:+$KOPT_rootflags,}ro" \
+        "$root_dev" /sysroot; then
+    echo "initramfs: failed to mount root" > /dev/kmsg
+    /bin/busybox sh
+fi
+
+if [ ! -x "/sysroot${KOPT_init:-/sbin/init}" ]; then
+    echo "initramfs: ${KOPT_init:-/sbin/init} missing in new root" > /dev/kmsg
+    /bin/busybox sh
+fi
+
+# --- hand over to the real system -----------------------------------------
+exec switch_root /sysroot ${KOPT_init:-/sbin/init}
+echo "initramfs: switch_root failed" > /dev/kmsg
+/bin/busybox sh
