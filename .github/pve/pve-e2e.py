@@ -83,7 +83,10 @@ class PVE:
         self.http.headers["CSRFPreventionToken"] = data["CSRFPreventionToken"]
 
     def call(self, method: str, path: str, **params):
-        resp = self.http.request(method, f"{self.base}{path}", data=params or None)
+        """One API request: parameters go in the query string on GET, in the
+        form body otherwise."""
+        kwargs = {"params": params or None} if method == "GET" else {"data": params or None}
+        resp = self.http.request(method, f"{self.base}{path}", **kwargs)
         if resp.status_code >= 400:
             raise RuntimeError(f"{method} {path} -> {resp.status_code} {resp.text[:300]}")
         return resp.json()["data"]
@@ -247,11 +250,12 @@ def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str
 
 
 def teardown(pve: PVE, vmid: str) -> None:
+    """Stop and destroy the VM. Every step is best-effort: a stuck guest must
+    never keep the machine around until the pool runs dry."""
     with contextlib.suppress(Exception):
-        pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/stop")
-    time.sleep(3)
+        pve.wait_task(pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/stop"), timeout=120)
     with contextlib.suppress(Exception):
-        pve.call("DELETE", f"/nodes/{NODE}/qemu/{vmid}")
+        pve.wait_task(pve.call("DELETE", f"/nodes/{NODE}/qemu/{vmid}"), timeout=120)
 
 
 def main() -> None:

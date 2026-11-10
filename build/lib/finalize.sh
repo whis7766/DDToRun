@@ -14,37 +14,42 @@ install_mbr() {
 	_mnt=$(mktemp -d /tmp/mbr-mnt.XXXXXX)
 	mount "$2" "$_mnt" || die "cannot mount partition for MBR install"
 
-	_log=$(mktemp)
-	_rc=0
-	cp "$_mnt/usr/share/syslinux/mbr.bin" "$_mbr" 2>"$_log" || _rc=1
-	if [ "$_rc" -eq 0 ] && [ ! -s "$_mbr" ]; then
-		printf 'syslinux mbr.bin not found in image - boot will fail\n' >"$_log"
-		_rc=1
+	# Collect the first problem instead of dying inside the mount: the temporary
+	# mount has to be released before the build can report anything useful.
+	_err=""
+	if ! cp "$_mnt/usr/share/syslinux/mbr.bin" "$_mbr" 2>/dev/null || [ ! -s "$_mbr" ]; then
+		_err="syslinux mbr.bin not found in image - boot will fail"
 	fi
-	if [ "$_rc" -eq 0 ]; then
+	if [ -z "$_err" ]; then
 		for _module in ldlinux.c32 menu.c32 libcom32.c32 libutil.c32; do
 			if [ ! -s "$_mnt/boot/$_module" ]; then
-				printf 'required runtime syslinux module missing: boot/%s\n' "$_module" >"$_log"
-				_rc=1
+				_err="required runtime syslinux module missing: boot/$_module"
 				break
 			fi
 		done
 	fi
-	if [ "$_rc" -eq 0 ]; then
+
+	# Only touch the image once it is known to be bootable.
+	if [ -z "$_err" ]; then
 		rm -f "$_mnt"/boot/System.map-* "$_mnt"/boot/config-*
 		rm -rf "$_mnt/usr/share/syslinux"
 	fi
-	sync
-	umount "$_mnt" || { cat "$_log"; rm -f "$_log"; rmdir "$_mnt" 2>/dev/null; die "umount failed"; }
-	rmdir "$_mnt" 2>/dev/null || true
-	if [ "$_rc" -ne 0 ]; then
-		cat "$_log"
-		rm -f "$_log" "$_mbr"
-		die "MBR bootstrap install failed"
-	fi
-	rm -f "$_log"
 
-	dd if="$_mbr" of="$1" bs=440 count=1 conv=notrunc status=none || die "failed to write MBR bootstrap"
+	sync
+	if ! umount "$_mnt"; then
+		rm -f "$_mbr"
+		rmdir "$_mnt" 2>/dev/null || true
+		die "cannot unmount $2${_err:+ (also: $_err)}"
+	fi
+	rmdir "$_mnt" 2>/dev/null || true
+
+	if [ -n "$_err" ]; then
+		rm -f "$_mbr"
+		die "$_err"
+	fi
+
+	dd if="$_mbr" of="$1" bs=440 count=1 conv=notrunc status=none ||
+		die "failed to write MBR bootstrap"
 	rm -f "$_mbr"
 }
 
@@ -58,7 +63,9 @@ install_mbr() {
 tune_ext4() {
 	tune2fs -m 0 -c 0 -i 0 "$1" >/dev/null 2>&1 || true
 
-	# e2fsck exits 1 when it fixed something; that is fine. Anything else is not.
+	# Two passes on purpose: the first compacts the directory indexes (-D), the
+	# journal can only be removed from a clean filesystem, and dropping it leaves
+	# a journal inode behind that the second pass reclaims.
 	_rc=0
 	e2fsck -fyD "$1" >/dev/null 2>&1 || _rc=$?
 	[ "$_rc" -le 1 ] || die "e2fsck failed with code $_rc"
@@ -73,6 +80,9 @@ tune_ext4() {
 }
 
 # export_image <raw> <dist_dir> - copy the raw image plus its checksum.
+#
+# The ".img.raw" name is what build.yml compresses and what the release asset
+# is cut from, so it is part of the contract rather than a cosmetic choice.
 export_image() {
 	mkdir -p "$2"
 	_out="$2/vps-app-runner.img.raw"

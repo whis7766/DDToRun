@@ -29,7 +29,7 @@ detach_loop() {
 	fi
 }
 
-# write_partition_table - one bootable Linux partition starting at 1MiB.
+# write_partition_table <image> - sets PART_DEV.
 #
 # Loop backends reject the BLKRRPART ioctl with EINVAL ("Re-reading the
 # partition table failed"), so --no-reread/--no-tell-kernel skip the in-use

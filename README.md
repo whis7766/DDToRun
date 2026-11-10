@@ -44,6 +44,7 @@ build/
     └── ssh_user_key.pub
 .github/
 ├── workflows/build.yml   # 只构建与发布
+├── workflows/pve-test.yml # 手动触发：在 PVE 上开机抓屏
 └── pve/pve-e2e.py        # PVE 真机启动测试
 scripts/check.sh          # 本地语法/格式检查
 ```
@@ -72,11 +73,13 @@ HEADLESS_SSH=true  bash build/build.sh   # vpsssh
 
 脚本会走租户的 `content=import` 通道上传镜像、用 `import-from` 建机、经 SSH direct-tcpip 隧道抓帧，最后清理。加 `--keep` 可保留虚拟机手工排查。租户 API 没有 `importdisk`/`import-volume`/`screendump`，这是当前权限下可用的唯一通路。
 
+也可以在 Actions 里手动触发 **PVE Real-Machine Boot Test**，选 `asset` / `vga` / `disk_bus` / `memory_mb` 组合，抓到的帧作为 artifact 上传。
+
 ## 两个刻意的设计
 
 **initramfs 只装 busybox。** 官方 init 走 `nlplug-findfs`（依赖 libcryptsetup），base 特色还带 `apk`，两者会把整套 OpenSSL/device-mapper 拖进来；换成 busybox 后，独立 `kmod` 又因为支持压缩模块直接依赖 libcrypto。最终做法是自定义 `tiny` 特色 + 只用 busybox 的 `modprobe`/`mdev`，initramfs 从 5.43 MB 降到 3.01 MB。
 
-**app-runner 不用 net/http。** `net/http` 会连带 HTTP/2 和整套 transport 抽象。改成 `crypto/tls` 上手写最小 HTTP/1.1：单流 GET、最多 10 次重定向、chunked 与 Content-Length、读超时 30s 的 stall 看门狗、固定 6 次重试、最小环境变量 `exec`。行为不变，体积 5.00 MB → 3.96 MB。
+**app-runner 不用 net/http。** `net/http` 会连带 HTTP/2 和整套 transport 抽象。改成 `crypto/tls` 上手写最小 HTTP/1.1：单流 GET、最多 10 次重定向、chunked 与 Content-Length、读超时 30s 的 stall 看门狗、固定 6 次重试、最小环境变量 `exec`。当前静态二进制 3.96 MB（4,149,400 字节）。
 
 ## 约束
 

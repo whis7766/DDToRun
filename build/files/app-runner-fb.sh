@@ -4,8 +4,12 @@
 # ASCII/text-console fallback. If no framebuffer binds, the script reports it,
 # exits non-zero and inittab respawns it.
 
+APP=/opt/business-app
+
+# DHCP rewrites /etc/resolv.conf on every lease, so pin the resolvers again
+# before the download starts rather than trusting the lease.
 printf 'nameserver 119.29.29.29\nnameserver 223.5.5.5\n' >/etc/resolv.conf 2>/dev/null
-pkill -f '^/opt/business-app' 2>/dev/null || true
+pkill -f "^$APP" 2>/dev/null || true
 stty sane 2>/dev/null || true
 
 # Generic PCI DRM drivers stay resident harmlessly when no matching device
