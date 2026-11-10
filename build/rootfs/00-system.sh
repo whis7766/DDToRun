@@ -3,6 +3,10 @@
 
 setup-hostname vps-app
 
+# Directories every later stage installs into. /usr/local/sbin is not part of
+# the base rootfs, and the kiosk stage runs before the app stage.
+install -d -m 0755 /opt /usr/local/sbin /var/log
+
 # The VPS has no IPv6 route; disabling IPv6 avoids resolver timeouts.
 cat >/etc/sysctl.conf <<'EOF'
 net.ipv6.conf.all.disable_ipv6 = 1

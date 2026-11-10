@@ -15,8 +15,6 @@ if [ -n "$_missing" ]; then
 fi
 echo "app-runner (static) installed"
 
-mkdir -p /var/log
-
 [ "$PROFILE" = "headless" ] || return 0
 
 install -m 0755 /mnt/files/app-runner.openrc /etc/init.d/app-runner
