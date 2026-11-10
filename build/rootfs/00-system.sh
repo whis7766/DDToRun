@@ -24,8 +24,16 @@ for _service in crond:default syslog:boot swap:boot hwclock:boot cgroups:sysinit
 	rc-update del "$_name" "$_level" >/dev/null 2>&1 || true
 done
 
-# No serial console on this appliance.
+# Serial console on ttyS0 (115200 8N1). The platform bridges the VM serial0
+# socket to a tenant-owned unix socket, so this is the interactive debug path
+# in both profiles and is independent of the VGA/kiosk path.
 sed -i '/^#\?ttyS0::respawn:/d' /etc/inittab
+printf '%s\n' 'ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100' >>/etc/inittab
+
+# The official tool's --serial-console wrote console=ttyS0; pin the baud rate
+# to 115200 and regenerate extlinux from its source of truth.
+sed -i 's|console=ttyS0|console=ttyS0,115200|' /etc/update-extlinux.conf
+update-extlinux --warn-only >/dev/null 2>&1 || true
 
 if [ "$PROFILE" = "headless" ]; then
 	# Headless: no VGA login at all, access is over SSH.
