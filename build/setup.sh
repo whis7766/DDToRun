@@ -468,13 +468,38 @@ if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
     find "$MROOT/kernel" -type d -empty -delete 2>/dev/null
     rm -f "$KEEPFILE"
     echo "  kept $(find "$MROOT/kernel" -name '*.ko*' 2>/dev/null | wc -l) kernel modules"
-    # Keep the scsi mkinitfs feature: instances may boot from a virtio-scsi
-    # disk (scsi0), whose virtio_scsi/sd_mod stack must be present in the
-    # initramfs or the root UUID cannot be resolved. The initramfs is rebuilt
-    # below from the trimmed module tree, which now retains those drivers.
+    # Rebuild a minimal initramfs. The stock "base" feature ships /sbin/apk and
+    # the stock init uses nlplug-findfs, which links libcryptsetup; together they
+    # pull the entire OpenSSL/dm stack (libcrypto alone is ~4.9 MB) into the
+    # initramfs even though this appliance has no apk/crypto/LVM need at boot.
+    #
+    # Replace "base" with a custom "tiny" feature (busybox + mdev + kmod only)
+    # and pair it with a custom init that coldplugs via mdev and resolves the
+    # root UUID with busybox findfs. The module features (ext4/scsi/virtio/kms)
+    # are retained so every driver we need is still present.
     if command -v mkinitfs >/dev/null 2>&1; then
-        if ! mkinitfs -o /boot/initramfs-virt "$KVER" >/dev/null 2>&1; then
-            echo "  WARN: mkinitfs rebuild failed; keeping original initramfs"
+        install -m755 /mnt/vendor/initramfs-init /etc/mkinitfs/initramfs-tiny
+        cat > /etc/mkinitfs/features.d/tiny.files <<'EOF'
+/bin/busybox
+/bin/sh
+/sbin/modprobe
+/sbin/mdev
+/lib/mdev
+/etc/mdev.conf
+/etc/modprobe.d/*.conf
+EOF
+        # tiny.files only; module lists come from the existing module features.
+        : > /etc/mkinitfs/features.d/tiny.modules
+        # kms (drm) modules are only needed by the VGA kiosk; headless images
+        # already trimmed those drivers from the module tree.
+        init_features="tiny ext4 scsi virtio"
+        if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
+            init_features="$init_features kms"
+        fi
+        echo "features=\"$init_features\"" > /etc/mkinitfs/mkinitfs.conf
+        if ! mkinitfs -i /etc/mkinitfs/initramfs-tiny \
+                -o /boot/initramfs-virt "$KVER" >/dev/null 2>&1; then
+            echo "  WARN: minimal mkinitfs failed; keeping original initramfs"
         fi
     fi
 fi

@@ -1,25 +1,22 @@
-// app-runner: static, no-shell launcher for the business binary.
-//
-// Runs on bare Alpine (musl, no glibc); the business binary is downloaded from
-// a URL baked into this binary once per boot, kept locally on failure, and
-// exec'd directly (syscall.Exec). No external configuration file is read.
-//
-// Single-stream GET only: no Range probing, no chunked/parallel download, which
-// keeps behavior compatible with plain HTTP/1.1 servers, CDNs and short links.
-// A single stall watchdog aborts a request that stops producing data so the
-// fixed-delay retry loop can restart cleanly.
+// app-runner slim: same behavior as app-runner.go but without net/http, so the
+// HTTP/2 stack and the net/http transport abstraction are dropped. Only a
+// minimal HTTP/1.1 client over crypto/tls is kept: single-stream GET, redirects,
+// chunked/content-length bodies, a stall watchdog via read deadlines, fixed
+// retries, and a clean syscall.Exec. TLS/cert verification is unchanged.
 package main
 
 import (
-	"context"
+	"bufio"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -28,15 +25,12 @@ import (
 const (
 	logPath      = "/var/log/app-runner.log"
 	maxRetry     = 6
+	maxRedirects = 10
 	retryDelay   = 3 * time.Second
 	stallTimeout = 30 * time.Second
 	userAgent    = "app-runner/1.0"
 )
 
-// On-disk paths are variables so tests can redirect them to a temp directory;
-// production defaults are unchanged. appURL is baked into the binary and may be
-// overridden at build time with -ldflags "-X main.appURL=..."; no runtime config
-// file is read.
 var (
 	appPath = "/opt/business-app"
 	tmpPath = "/opt/business-app.tmp"
@@ -52,19 +46,172 @@ func haveApp() bool {
 	return err == nil && fi.Size() > 0
 }
 
-// newClient keeps the transport minimal for maximum compatibility: it follows
-// redirects by default, uses plain GET, sends no Range header, and does not
-// pin concurrency limits or socket buffers.
-func newClient() *http.Client {
-	transport := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		IdleConnTimeout:       30 * time.Second,
-		DisableCompression:    true, // binary artifact; keep bytes as-is
-		ExpectContinueTimeout: 1 * time.Second,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+// conn is the minimal abstraction over a TCP or TLS stream.
+type conn struct {
+	raw  net.Conn
+	br   *bufio.Reader
+	cl   int64 // expected content length (-1 = unknown / read to EOF)
+	chunk bool
+}
+
+func dial(rawURL string) (*conn, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
 	}
-	return &http.Client{Transport: transport}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+	raw, err := dialer.Dial("tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return nil, err
+	}
+	var stream net.Conn = raw
+	if u.Scheme == "https" {
+		tc := tls.Client(raw, &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: host,
+		})
+		tc.SetDeadline(time.Now().Add(10 * time.Second))
+		if err := tc.Handshake(); err != nil {
+			raw.Close()
+			return nil, err
+		}
+		tc.SetDeadline(time.Time{})
+		stream = tc
+	}
+	c := &conn{raw: stream, br: bufio.NewReaderSize(stream, 1<<16), cl: -1}
+
+	// Request target: origin-form path (and query). Default to "/".
+	target := u.RequestURI()
+	if target == "" || target == u.Host {
+		target = "/"
+	}
+	req := "GET " + target + " HTTP/1.1\r\n" +
+		"Host: " + u.Host + "\r\n" +
+		"User-Agent: " + userAgent + "\r\n" +
+		"Accept: */*\r\n" +
+		"Connection: close\r\n\r\n"
+	if _, err := io.WriteString(stream, req); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// readStatus reads and parses the response status line and headers.
+func (c *conn) readStatus() (int, string, error) {
+	line, err := c.br.ReadString('\n')
+	if err != nil {
+		return 0, "", err
+	}
+	parts := strings.Split(strings.TrimSpace(line), " ")
+	if len(parts) < 2 || !strings.HasPrefix(parts[0], "HTTP/") {
+		return 0, "", fmt.Errorf("bad status line: %q", line)
+	}
+	code, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, "", err
+	}
+	location := ""
+	for {
+		h, err := c.br.ReadString('\n')
+		if err != nil {
+			return 0, "", err
+		}
+		h = strings.TrimSpace(h)
+		if h == "" {
+			break
+		}
+		idx := strings.IndexByte(h, ':')
+		if idx < 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(h[:idx]))
+		val := strings.TrimSpace(h[idx+1:])
+		switch key {
+		case "content-length":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				c.cl = n
+			}
+		case "transfer-encoding":
+			if strings.Contains(strings.ToLower(val), "chunked") {
+				c.chunk = true
+				c.cl = -1
+			}
+		case "location":
+			location = val
+		}
+	}
+	return code, location, nil
+}
+
+// armWatchdog makes the next read fail if no data arrives for stallTimeout.
+func (c *conn) armWatchdog() {
+	c.raw.SetReadDeadline(time.Now().Add(stallTimeout))
+}
+
+// bodyReader returns the io.Reader for the response body, transparently
+// decoding chunked transfer encoding.
+func (c *conn) bodyReader() io.Reader {
+	if c.chunk {
+		return &chunkedReader{br: c.br, c: c}
+	}
+	if c.cl >= 0 {
+		return io.LimitReader(c.br, c.cl)
+	}
+	return c.br // Connection: close -> read until EOF
+}
+
+type chunkedReader struct {
+	br     *bufio.Reader
+	c      *conn
+	rem    int64
+	done   bool
+}
+
+func (r *chunkedReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	if r.rem == 0 {
+		sizeLine, err := r.br.ReadString('\n')
+		if err != nil {
+			return 0, err
+		}
+		sizeLine = strings.TrimSpace(sizeLine)
+		if i := strings.IndexByte(sizeLine, ';'); i >= 0 {
+			sizeLine = sizeLine[:i]
+		}
+		n, err := strconv.ParseInt(sizeLine, 16, 64)
+		if err != nil {
+			return 0, err
+		}
+		if n == 0 {
+			r.done = true
+			return 0, io.EOF
+		}
+		r.rem = n
+	}
+	if int64(len(p)) > r.rem {
+		p = p[:r.rem]
+	}
+	n, err := r.br.Read(p)
+	r.rem -= int64(n)
+	if r.rem == 0 {
+		// Consume the trailing CRLF after this chunk (read through the '\n').
+		if _, lerr := r.br.ReadString('\n'); lerr != nil && lerr != io.EOF {
+			return n, lerr
+		}
+	}
+	return n, err
 }
 
 func fetch() bool {
@@ -72,14 +219,11 @@ func fetch() bool {
 		log.Println("no download URL baked in - skip download")
 		return false
 	}
-	url := appURL
 	os.Remove(tmpPath)
 
 	for attempt := 1; attempt <= maxRetry; attempt++ {
-		log.Printf("fetch attempt %d/%d: %s", attempt, maxRetry, url)
-		ctx, cancel := context.WithCancel(context.Background())
-		err := downloadFile(ctx, url)
-		cancel()
+		log.Printf("fetch attempt %d/%d: %s", attempt, maxRetry, appURL)
+		err := downloadFile(appURL)
 		if err != nil {
 			log.Printf("download failed: %v", err)
 			status("download failed (%d/%d): %v", attempt, maxRetry, err)
@@ -93,7 +237,7 @@ func fetch() bool {
 			time.Sleep(retryDelay)
 			continue
 		}
-		os.Chmod(appPath, 0755)
+		os.Chmod(appPath, 0o755)
 		fi, _ := os.Stat(appPath)
 		log.Printf("downloaded new version (%d bytes)", fi.Size())
 		status("downloaded new version: %d bytes", fi.Size())
@@ -108,41 +252,54 @@ func fetch() bool {
 	return false
 }
 
-// downloadFile fetches the whole artifact in one GET request and writes it to
-// tmpPath. No Range header, no parallelism.
-func downloadFile(ctx context.Context, url string) error {
+// downloadFile follows up to maxRedirects then streams the artifact in one GET.
+func downloadFile(rawURL string) error {
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	cctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	req, _ := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
-	req.Header.Set("User-Agent", userAgent)
-	resp, err := newClient().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	timer := time.NewTimer(stallTimeout)
-	defer timer.Stop()
-	go func() {
-		select {
-		case <-timer.C:
-			cancel()
-		case <-cctx.Done():
+	current := rawURL
+	var body io.Reader
+	var finalConn *conn
+	var total int64 = -1
+	for hops := 0; ; hops++ {
+		c, err := dial(current)
+		if err != nil {
+			return err
 		}
-	}()
+		code, location, err := c.readStatus()
+		if err != nil {
+			c.raw.Close()
+			return err
+		}
+		if code >= 300 && code < 400 && location != "" {
+			c.raw.Close()
+			if hops >= maxRedirects {
+				return fmt.Errorf("too many redirects")
+			}
+			next, err := resolveURL(current, location)
+			if err != nil {
+				return err
+			}
+			current = next
+			continue
+		}
+		if code != 200 {
+			c.raw.Close()
+			return fmt.Errorf("HTTP %d", code)
+		}
+		body = c.bodyReader()
+		finalConn = c
+		if c.cl >= 0 {
+			total = c.cl
+		}
+		defer c.raw.Close()
+		break
+	}
 
-	stallRd := &stallReader{r: resp.Body, reset: timer.Reset}
-	pw := newProgress(resp.ContentLength)
+	pw := newProgress(total)
 	progressDone := make(chan struct{})
 	go pw.Run(progressDone)
 	defer func() {
@@ -150,28 +307,43 @@ func downloadFile(ctx context.Context, url string) error {
 		fmt.Println()
 	}()
 
-	if _, err := io.CopyBuffer(f, io.TeeReader(stallRd, pw), make([]byte, 1<<16)); err != nil {
-		return err
+	// Stall watchdog: reset the read deadline before every read so a 30s gap
+	// with no bytes makes the read fail, matching the original stall behavior.
+	buf := make([]byte, 1<<16)
+	var written int64
+	for {
+		finalConn.armWatchdog()
+		n, rerr := body.Read(buf)
+		if n > 0 {
+			if _, werr := f.Write(buf[:n]); werr != nil {
+				return werr
+			}
+			written += int64(n)
+			pw.Write(buf[:n])
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return rerr
+		}
 	}
-	if fi, statErr := f.Stat(); statErr == nil && resp.ContentLength > 0 && fi.Size() != resp.ContentLength {
-		return fmt.Errorf("size mismatch after download: got %d want %d", fi.Size(), resp.ContentLength)
+	if total > 0 && written != total {
+		return fmt.Errorf("size mismatch: got %d want %d", written, total)
 	}
 	return nil
 }
 
-// stallReader resets the watchdog whenever a chunk of bytes arrives; silence
-// past stallTimeout cancels the request.
-type stallReader struct {
-	r     io.Reader
-	reset func(time.Duration) bool
-}
-
-func (s *stallReader) Read(b []byte) (int, error) {
-	n, err := s.r.Read(b)
-	if n > 0 {
-		s.reset(stallTimeout)
+func resolveURL(base, ref string) (string, error) {
+	b, err := url.Parse(base)
+	if err != nil {
+		return "", err
 	}
-	return n, err
+	r, err := url.Parse(ref)
+	if err != nil {
+		return "", err
+	}
+	return b.ResolveReference(r).String(), nil
 }
 
 type progressWriter struct {
@@ -188,9 +360,8 @@ func newProgress(total int64) *progressWriter {
 }
 
 func (p *progressWriter) Write(b []byte) (int, error) {
-	n := len(b)
-	p.read.Add(int64(n))
-	return n, nil
+	p.read.Add(int64(len(b)))
+	return len(b), nil
 }
 
 func (p *progressWriter) Run(done <-chan struct{}) {
@@ -229,19 +400,13 @@ func stdoutIsTerminal() bool {
 }
 
 func prepareBeforeExec() {
-	// Stop any stale business process before replacing the launcher.
 	_ = exec.Command("pkill", "-f", "^/opt/business-app").Run()
-	// Only reset/clear a real terminal (VGA tty1). On the supervised SSH build
-	// stdout goes to a log file, so ANSI clear sequences must not be written there.
 	if stdoutIsTerminal() {
 		fmt.Print("\033[2J\033[H\033[?25l")
 	}
 }
 
 func execApp() error {
-	// Bare argv[0], no forwarded launcher arguments, and a minimal clean
-	// environment: do not inherit the launcher's own variables such as
-	// APP_URL or APP_RUNNER_LOG_STDOUT_ONLY into the business program.
 	env := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 	return syscall.Exec(appPath, []string{appPath}, env)
 }
@@ -266,11 +431,11 @@ func main() {
 			log.Println("running", appPath)
 			prepareBeforeExec()
 			if err := execApp(); err != nil {
-				log.Printf("exec failed: %v - restarting local copy in 2s", err)
+				log.Printf("exec failed: %v - restarting in 2s", err)
 				status("exec failed: %v", err)
 			}
 		} else {
-			log.Println("no app available - retry download in 2s")
+			log.Println("no app available - retry in 2s")
 		}
 		time.Sleep(2 * time.Second)
 	}
