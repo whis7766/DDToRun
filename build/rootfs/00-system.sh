@@ -30,9 +30,13 @@ done
 sed -i '/^#\?ttyS0::respawn:/d' /etc/inittab
 printf '%s\n' 'ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100' >>/etc/inittab
 
-# The official tool's --serial-console wrote console=ttyS0; pin the baud rate
-# to 115200 and regenerate extlinux from its source of truth.
-sed -i 's|console=ttyS0|console=ttyS0,115200|' /etc/update-extlinux.conf
+# The official tool's --serial-console writes console=ttyS0, which makes the
+# kernel move its console entirely to the serial port: after switch_root the VGA
+# screen stays black, so a captured frame can no longer tell "still booting"
+# from "hung". Keep tty0 first so kernel messages appear on both, and pin the
+# serial baud rate. /dev/console resolves to the last console=, i.e. ttyS0.
+sed -i 's|^\(default_kernel_opts=\).*|\1"console=tty0 console=ttyS0,115200"|' \
+	/etc/update-extlinux.conf
 update-extlinux --warn-only >/dev/null 2>&1 || true
 
 if [ "$PROFILE" = "headless" ]; then
