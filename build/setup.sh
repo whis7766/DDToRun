@@ -479,10 +479,15 @@ if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
     # are retained so every driver we need is still present.
     if command -v mkinitfs >/dev/null 2>&1; then
         install -m755 /mnt/vendor/initramfs-init /etc/mkinitfs/initramfs-tiny
+        # Do NOT include /sbin/modprobe: on this system it is a symlink to the
+        # standalone kmod binary, which NEEDED libcrypto (+libzstd/liblzma/libz)
+        # for compressed-module and signature support, dragging the 5MB crypto
+        # library back in. busybox provides its own modprobe that reads
+        # modules.dep and handles .ko.gz with no external dependency; the init
+        # script invokes it explicitly as "busybox modprobe".
         cat > /etc/mkinitfs/features.d/tiny.files <<'EOF'
 /bin/busybox
 /bin/sh
-/sbin/modprobe
 /sbin/mdev
 /lib/mdev
 /etc/mdev.conf

@@ -53,14 +53,16 @@ done
 # remaining MODALIAS gap (net/drm).
 echo /sbin/mdev > /proc/sys/kernel/hotplug
 mods="${KOPT_modules//,/ }"
+# Use busybox's own modprobe (not the standalone kmod, which is excluded to
+# keep libcrypto out). It resolves modules.dep dependencies and .ko.gz.
 for m in $mods loop virtio virtio_ring virtio_pci virtio_mmio virtio_scsi sd_mod \
          virtio_blk ext4 jbd2 mbcache; do
-    modprobe -q "$m" 2>/dev/null
+    busybox modprobe -q "$m" 2>/dev/null
 done
-mdev -s
+busybox mdev -s
 # Re-try the storage stack after the coldplug replay, in case a dependency
 # only became available during mdev -s.
-modprobe -a virtio_scsi sd_mod virtio_blk ext4 2>/dev/null
+busybox modprobe -a virtio_scsi sd_mod virtio_blk ext4 2>/dev/null
 
 # --- resolve the root device, waiting for the block device to appear ------
 case "$KOPT_root" in
