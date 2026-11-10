@@ -321,11 +321,20 @@ printf 'nameserver 119.29.29.29\nnameserver 223.5.5.5\n' > /etc/resolv.conf 2>/d
 pkill -f '^/opt/business-app' 2>/dev/null || true
 stty sane 2>/dev/null || true
 # Probe common virtual display controllers; modprobe pulls the drm/fb
-# dependency closure in automatically (bochs=QEMU std VGA, cirrus=QEMU cirrus,
-# virtio-gpu=virtio GPU, qxl=SPICE/QXL cloud desktop, vmwgfx=VMware SVGA,
-# vboxvideo=VirtualBox, hyperv_drm=Hyper-V, drm_xen_front=Xen; simpledrm=
-# simple-framebuffer/EFI GOP). Only drivers matching an actual device bind.
-for m in bochs cirrus virtio-gpu simpledrm qxl vmwgfx vboxvideo hyperv_drm drm_xen_front; do modprobe "$m" 2>/dev/null || true; done
+# dependency closure in automatically. Generic PCI DRM drivers (bochs=QEMU std
+# VGA, cirrus, virtio-gpu, qxl=SPICE cloud desktop, simpledrm=simple-framebuffer
+# /EFI GOP) safely stay resident even with no matching device.
+for m in bochs cirrus virtio-gpu simpledrm qxl; do modprobe "$m" 2>/dev/null || true; done
+# Platform-specific drivers are loaded only when their bus/platform is present.
+# hyperv_drm must be gated on the vmbus: without it the driver leaves a stale
+# entry after a failed init and every later modprobe fails "resource busy" while
+# dmesg repeatedly prints "Driver 'hyperv_drm' is already registered".
+[ -d /sys/bus/vmbus ] && modprobe hyperv_drm 2>/dev/null || true
+[ "$(cat /sys/hypervisor/type 2>/dev/null)" = "xen" ] && modprobe drm_xen_front 2>/dev/null || true
+case "$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)" in
+    *VMware*) modprobe vmwgfx 2>/dev/null || true ;;
+    *innotek*|*VirtualBox*|*Oracle*) modprobe vboxvideo 2>/dev/null || true ;;
+esac
 # Wait for the kernel to register /dev/fb0 after a driver binds the hardware.
 i=0
 while [ ! -c /dev/fb0 ] && [ "$i" -lt 30 ]; do
@@ -364,13 +373,13 @@ ext4
 mbcache
 sch_fq
 EOF
-# VGA flavor loads framebuffer/drm drivers so fbterm gets /dev/fb0 on cloud
-# desktops that expose a virtual GPU (QEMU std VGA -> bochs, QEMU cirrus ->
-# cirrus, virtio-gpu, simple-framebuffer/EFI GOP -> simpledrm). Module names
-# use the real modprobe basename (virtio-gpu, not virtio_gpu); unknown names are
-# skipped by modprobe, and drm/fb/i2c-core/virtio_dma_buf load as dependencies.
+# VGA flavor loads generic framebuffer/drm drivers so fbterm gets /dev/fb0 on
+# cloud desktops that expose a virtual GPU. Only generic PCI DRM drivers are
+# declared here: platform-specific drivers (hyperv_drm, drm_xen_front, vmwgfx,
+# vboxvideo) are conditionally loaded at runtime by app-runner-fb.sh after
+# checking the bus/DMI, because loading hyperv_drm without vmbus wedges it.
 if [ "$HEADLESS_SSH" != "true" ] && [ "$CJK_TTY" != "false" ]; then
-    for m in bochs cirrus virtio-gpu simpledrm qxl vmwgfx vboxvideo hyperv_drm drm_xen_front; do
+    for m in bochs cirrus virtio-gpu simpledrm qxl; do
         grep -qx "$m" /etc/modules || echo "$m" >> /etc/modules
     done
 fi
