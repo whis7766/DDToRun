@@ -53,6 +53,12 @@ def normalize_fingerprint(value: str) -> str:
     return value.replace(":", "").replace(" ", "").lower()
 
 
+def ssh_username() -> str:
+    """SSH login name. The API user carries the realm suffix (``ddtester@pve``),
+    but the SSH account is the bare name; PVE_SSH_USER overrides if needed."""
+    return os.environ.get("PVE_SSH_USER") or env("PVE_USER").split("@")[0]
+
+
 def verify_server_fingerprint(host: str, port: int, expected: str) -> None:
     """Compare the API server certificate against PVE_TLS_FP when provided."""
     ctx = ssl.create_default_context()
@@ -75,7 +81,8 @@ class PVE:
         self.http = requests.Session()
         self.http.verify = False
         resp = self.http.post(
-            f"{base}/access/ticket", data={"username": user, "password": password}
+            f"{base}/access/ticket", data={"username": user, "password": password},
+            verify=False,
         )
         resp.raise_for_status()
         data = resp.json()["data"]
@@ -86,7 +93,7 @@ class PVE:
         """One API request: parameters go in the query string on GET, in the
         form body otherwise."""
         kwargs = {"params": params or None} if method == "GET" else {"data": params or None}
-        resp = self.http.request(method, f"{self.base}{path}", **kwargs)
+        resp = self.http.request(method, f"{self.base}{path}", verify=False, **kwargs)
         if resp.status_code >= 400:
             raise RuntimeError(f"{method} {path} -> {resp.status_code} {resp.text[:300]}")
         return resp.json()["data"]
@@ -96,7 +103,7 @@ class PVE:
             resp = self.http.post(
                 f"{self.base}/nodes/{NODE}/storage/{STORAGE}/upload",
                 files={"filename": (filepath.name, handle)},
-                data={"content": content},
+                data={"content": content}, verify=False,
             )
         if resp.status_code >= 400:
             raise RuntimeError(f"upload -> {resp.status_code} {resp.text[:300]}")
@@ -156,7 +163,7 @@ def ssh_vnc_tunnel(vnc_port: int, local_port: int = 5910):
     direct-tcpip channel works.
     """
     transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
-    transport.connect(username=env("PVE_USER"), password=env("PVE_SSH_PASS"))
+    transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
 
     stop = threading.Event()
     server = socket.socket()
@@ -225,7 +232,7 @@ def serial_check(vmid: str, timeout: float = 60.0) -> None:
     alongside the VNC capture. The appliance ships an empty root password.
     """
     transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
-    transport.connect(username=env("PVE_USER"), password=env("PVE_SSH_PASS"))
+    transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
     chan = transport.open_session()
     chan.settimeout(5)
     chan.exec_command(f"socat - UNIX-CONNECT:$HOME/serial-{vmid}.sock 2>&1")
@@ -337,7 +344,7 @@ def main() -> None:
         password=env("PVE_API_PASS"),
     )
 
-    raw = args.raw or download_asset(args.tag, args.asset, OUT / args.asset)
+    raw = args.raw or download_asset(args.tag, args.asset, OUT / f"{args.asset}.raw")
     pve.wait_task(pve.upload("import", raw))
     import_source = f"{STORAGE}:import/{raw.name}"
 
