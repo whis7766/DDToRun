@@ -1,19 +1,21 @@
-name: Build Alpine VPS App Runner Image
+name: Build Alpine VPS Image
 
-# Two flavors are built in parallel and published together to the release tag:
-#   vpsvga - default VGA kiosk (fbterm + CJK font on tty1), no SSH
-#   vpsssh - headless SSH-only (sshd on port 22, key-only; app as supervised service)
-# Production build only: no QEMU/serial debug steps in this workflow.
+# Two flavors are built in parallel and published together to one release tag:
+#   vpsvga - VGA kiosk: fbterm + CJK font on tty1, no SSH
+#   vpsssh - headless: sshd on port 22 (key-only), app as a supervised service
+#
+# This workflow only builds and publishes. Every real-machine test runs on the
+# PVE host (see pve-test.yml), never on a runner.
 
 on:
   workflow_dispatch:
     inputs:
       app_url:
-        description: "Business binary download URL (blank = no app-runner)"
+        description: "Business binary URL (blank keeps the default compiled into app-runner)"
         required: false
         type: string
       release_tag:
-        description: "Release tag"
+        description: "Release tag to publish to"
         required: true
         default: "dd"
         type: string
@@ -23,12 +25,12 @@ on:
         default: "1"
         type: string
       alpine_branch:
-        description: "Alpine branch (v3.22 stable = official virt baseline, smaller and reproducible)"
+        description: "Alpine branch"
         required: false
         default: "v3.22"
         type: string
       cgo_compat:
-        description: "Install glibc compat layer (gcompat/libc6-compat) for a dynamic-glibc business binary. Default false = pure static only, smaller image."
+        description: "Install glibc compat layer (gcompat/libc6-compat) for a dynamic-glibc binary"
         required: true
         default: "false"
         type: string
@@ -39,14 +41,14 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.profile.asset }}
+    name: Build ${{ matrix.asset }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        profile:
-          - { asset: vpsvga, headless_ssh: "false", cjk_tty: "true" }
-          - { asset: vpsssh, headless_ssh: "true",  cjk_tty: "false" }
+        include:
+          - { asset: vpsvga, headless: "false" }
+          - { asset: vpsssh, headless: "true" }
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -60,61 +62,60 @@ jobs:
       - name: Build app-runner
         env:
           GOEXPERIMENT: "simd,jsonv2,newinliner,runtimefreegc,greenteagc,sizespecializedmalloc,mapsplitgroup"
-          APP_URL: "${{ github.event.inputs.app_url }}"
+          APP_URL: "${{ inputs.app_url }}"
         run: |
           cd build/vendor
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 goamd64=v3 go build -trimpath \
-            -ldflags "-s -w -X main.appURL=${APP_URL:-https://furryfree.pages.dev/release?token=jaJ81HfL&filename=subs-check_linux_amd64v3&tag=ctyun}" \
-            -o app-runner app-runner.go
+          # The default URL lives in app-runner.go only; an explicit app_url
+          # input overrides it through -X.
+          LDFLAGS="-s -w"
+          if [ -n "$APP_URL" ]; then
+            LDFLAGS="$LDFLAGS -X main.appURL=$APP_URL"
+          fi
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
+            go build -trimpath -ldflags "$LDFLAGS" -o app-runner app-runner.go
+          stat -c '%n %s bytes' app-runner
 
       - name: Install host build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y zerofree zstd
 
-      - name: Build image (${{ matrix.profile.asset }})
+      - name: Build image (${{ matrix.asset }})
         env:
-          APP_URL: "${{ github.event.inputs.app_url }}"
-          IMAGE_SIZE_GB: "${{ github.event.inputs.image_size_gb }}"
-          ALPINE_BRANCH: "${{ github.event.inputs.alpine_branch }}"
-          CGO_COMPAT: "${{ github.event.inputs.cgo_compat }}"
-          HEADLESS_SSH: "${{ matrix.profile.headless_ssh }}"
-          CJK_TTY: "${{ matrix.profile.cjk_tty }}"
+          APP_URL: "${{ inputs.app_url }}"
+          IMAGE_SIZE_GB: "${{ inputs.image_size_gb }}"
+          ALPINE_BRANCH: "${{ inputs.alpine_branch }}"
+          CGO_COMPAT: "${{ inputs.cgo_compat }}"
+          HEADLESS_SSH: "${{ matrix.headless }}"
         run: |
-          # Do not rely on `sudo -E`: newer sudo builds reject preserving the
-          # whole environment ("'-E' is ignored"), which would silently drop
-          # every variable and make build.sh fall back to the VGA profile. Pass
-          # the inputs explicitly through `env`, which works regardless of the
-          # sudo environment policy.
+          # Do not use `sudo -E`: recent sudo builds ignore it and silently
+          # drop every variable, which would build the wrong profile. Pass the
+          # inputs explicitly through env instead.
           sudo env \
             APP_URL="$APP_URL" \
             IMAGE_SIZE_GB="$IMAGE_SIZE_GB" \
             ALPINE_BRANCH="$ALPINE_BRANCH" \
             CGO_COMPAT="$CGO_COMPAT" \
             HEADLESS_SSH="$HEADLESS_SSH" \
-            CJK_TTY="$CJK_TTY" \
             bash build/build.sh
 
-      - name: Compress to ${{ matrix.profile.asset }}
+      - name: Compress to ${{ matrix.asset }}
         run: |
           cd "$GITHUB_WORKSPACE/dist"
           sudo chown -R "$(id -un):$(id -gn)" .
-          RAW="vps-app-runner.img.raw"
-          OUT="${{ matrix.profile.asset }}"
-          # -19 gives virtually the same ratio as -22 --ultra but finishes in
-          # roughly half the wall time; keep the large window for the 1GB raw.
-          zstd -q -19 --long=27 -f "$RAW" -o "$OUT"
-          sha256sum "$OUT" | tee "$OUT.sha256"
-          ls -lh "$OUT"
-          stat -c '%n %s bytes' "$OUT"
+          # -19 gives virtually the same ratio as -22 --ultra in about half
+          # the wall time; keep the large window for the 1GB raw.
+          zstd -q -19 --long=27 -f vps-app-runner.img.raw -o "${{ matrix.asset }}"
+          sha256sum "${{ matrix.asset }}" | tee "${{ matrix.asset }}.sha256"
+          stat -c '%n %s bytes' "${{ matrix.asset }}"
 
       - name: Upload compressed artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pkg-${{ matrix.profile.asset }}
+          name: pkg-${{ matrix.asset }}
           path: |
-            dist/${{ matrix.profile.asset }}
-            dist/${{ matrix.profile.asset }}.sha256
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
           retention-days: 1
 
   publish:
@@ -132,41 +133,18 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Resolve release tag
-        id: resolve_tag
-        env:
-          INPUT_TAG: ${{ inputs.release_tag }}
-        run: |
-          TAG="${INPUT_TAG:-dd}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Release tag: ${TAG}"
-
-      - name: Remove superseded legacy asset (vpsapp)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.resolve_tag.outputs.tag }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            if gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx 'vpsapp'; then
-              gh release delete-asset "$TAG" vpsapp --yes || true
-              echo "removed legacy asset vpsapp"
-            fi
-          else
-            echo "release $TAG does not exist yet; nothing to clean"
-          fi
-
       - name: Move release tag to current commit
         env:
-          TAG: ${{ steps.resolve_tag.outputs.tag }}
+          TAG: ${{ inputs.release_tag }}
         run: |
-          git tag -f "${TAG}" HEAD
-          git push origin "refs/tags/${TAG}" --force
+          git tag -f "$TAG" HEAD
+          git push origin "refs/tags/$TAG" --force
 
       - name: Create/Update Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.resolve_tag.outputs.tag }}
-          name: ${{ steps.resolve_tag.outputs.tag }}
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
           body: ""
           files: |
             dist/vpsvga
