@@ -44,14 +44,23 @@ for opt in $(cat /proc/cmdline); do
     esac
 done
 
-# --- coldplug: mdev as hotplug helper, explicit modules, then replay /sys --
+# --- coldplug --------------------------------------------------------------
+# Register mdev for asynchronous events, then explicitly load the storage and
+# filesystem stack. Relying solely on mdev's MODALIAS replay is not guaranteed
+# to bind the virtio-scsi root in time, so the drivers this appliance can boot
+# from (both virtio-scsi and virtio-blk) are loaded deterministically; missing
+# modules are ignored. mdev -s then creates the device nodes and fills any
+# remaining MODALIAS gap (net/drm).
 echo /sbin/mdev > /proc/sys/kernel/hotplug
-# Explicitly load the cmdline modules (ext4) and loop; mdev -s below covers the
-# storage/net/drm drivers from their MODALIAS entries. Use shell substitution
-# (no external tr) to split a comma-separated module list.
 mods="${KOPT_modules//,/ }"
-modprobe -a $mods loop 2>/dev/null
+for m in $mods loop virtio virtio_ring virtio_pci virtio_mmio virtio_scsi sd_mod \
+         virtio_blk ext4 jbd2 mbcache; do
+    modprobe -q "$m" 2>/dev/null
+done
 mdev -s
+# Re-try the storage stack after the coldplug replay, in case a dependency
+# only became available during mdev -s.
+modprobe -a virtio_scsi sd_mod virtio_blk ext4 2>/dev/null
 
 # --- resolve the root device, waiting for the block device to appear ------
 case "$KOPT_root" in
@@ -72,6 +81,9 @@ done
 
 if [ -z "$root_dev" ] || [ ! -b "$root_dev" ]; then
     echo "initramfs: root device '$KOPT_root' not found" > /dev/kmsg
+    echo "--- loaded modules ---"; cat /proc/modules
+    echo "--- block devices ---"; ls -l /dev/sd* /dev/vd* 2>/dev/null
+    echo "--- findfs result ---"; findfs "$KOPT_root" 2>&1
     echo "emergency recovery shell. Type 'exit' to retry."
     /bin/busybox sh
 fi
