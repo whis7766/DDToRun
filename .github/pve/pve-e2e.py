@@ -233,6 +233,7 @@ def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str
         agent=0,
         tablet=0,
         vga=vga,
+        serial0="socket",
     )
     if disk_bus == "scsi":
         config.update(
