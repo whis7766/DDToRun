@@ -25,13 +25,16 @@ busybox mount -t proc -o noexec,nosuid,nodev proc /proc
 
 # busybox --install needs these directories to exist before linking applets.
 busybox mkdir -p /bin /sbin /usr/bin /usr/sbin /dev/pts /dev/shm
-busybox --install -s
+# argv[0] must be an absolute path here: called as a bare name busybox refuses
+# with "'busybox' is not an absolute path", links nothing, and every
+# unqualified command below silently fails.
+/bin/busybox --install -s
 
-mount -t devpts -o gid=5,mode=0620,noexec,nosuid devpts /dev/pts
-mount -t tmpfs -o nodev,nosuid,noexec shm /dev/shm
+busybox mount -t devpts -o gid=5,mode=0620,noexec,nosuid devpts /dev/pts
+busybox mount -t tmpfs -o nodev,nosuid,noexec shm /dev/shm
 
 # --- kernel command line --------------------------------------------------
-for _opt in $(cat /proc/cmdline); do
+for _opt in $(busybox cat /proc/cmdline); do
 	case "$_opt" in
 	root=*) KOPT_root="${_opt#root=}" ;;
 	rootflags=*) KOPT_rootflags="${_opt#rootflags=}" ;;
@@ -64,26 +67,26 @@ esac
 
 _i=0
 while [ "$_i" -lt 150 ]; do
-	[ -n "$root_dev" ] || root_dev=$(findfs "$KOPT_root" 2>/dev/null)
+	[ -n "$root_dev" ] || root_dev=$(busybox findfs "$KOPT_root" 2>/dev/null)
 	[ -n "$root_dev" ] && [ -b "$root_dev" ] && break
-	sleep 0.2
+	busybox sleep 0.2
 	_i=$((_i + 1))
 done
 
 if [ -z "$root_dev" ] || [ ! -b "$root_dev" ]; then
 	echo "initramfs: root device '$KOPT_root' not found" >/dev/kmsg
 	echo "--- loaded modules ---"
-	cat /proc/modules
+	busybox cat /proc/modules
 	echo "--- block devices ---"
-	ls -l /dev/sd* /dev/vd* 2>/dev/null
+	busybox ls -l /dev/sd* /dev/vd* 2>/dev/null
 	echo "--- findfs result ---"
-	findfs "$KOPT_root" 2>&1
+	busybox findfs "$KOPT_root" 2>&1
 	echo "emergency recovery shell. Type 'exit' to retry."
 	busybox sh
 fi
 
 # --- mount the real root read-only ----------------------------------------
-mkdir -p /sysroot
+busybox mkdir -p /sysroot
 _mount_opts=ro
 [ -n "$KOPT_rootflags" ] && _mount_opts="$KOPT_rootflags,ro"
 
@@ -91,7 +94,7 @@ _mount_opts=ro
 _type=""
 [ -n "$KOPT_rootfstype" ] && _type="-t $KOPT_rootfstype"
 # shellcheck disable=SC2086
-if ! mount $_type -o "$_mount_opts" "$root_dev" /sysroot; then
+if ! busybox mount $_type -o "$_mount_opts" "$root_dev" /sysroot; then
 	echo "initramfs: failed to mount root" >/dev/kmsg
 	busybox sh
 fi
@@ -104,6 +107,6 @@ fi
 
 # --- hand over to the real system -----------------------------------------
 # shellcheck disable=SC2093  # the lines below are the emergency path when exec fails
-exec switch_root /sysroot "${KOPT_init:-/sbin/init}"
+exec busybox switch_root /sysroot "${KOPT_init:-/sbin/init}"
 echo "initramfs: switch_root failed" >/dev/kmsg
 busybox sh
