@@ -29,7 +29,7 @@ install_fbterm_build_deps() {
 }
 
 build_fbterm() {
-	[ -f /mnt/vendor/fbterm-src.tar.gz ] || die "fbterm source missing (CJK tty requires it)"
+	[ -f /mnt/vendor/fbterm-src.tar.gz ] || die "fbterm source missing (kiosk requires it)"
 
 	echo "==> building fbterm from upstream source"
 	install_fbterm_build_deps
@@ -53,7 +53,7 @@ build_fbterm() {
 		die "fbterm build failed"
 	fi
 
-	cd /
+	cd / || die "cannot leave the build directory"
 	rm -rf /tmp/fbterm-*
 	strip /usr/bin/fbterm 2>/dev/null || true
 	apk del .fbterm-build-deps >/dev/null 2>&1 || true

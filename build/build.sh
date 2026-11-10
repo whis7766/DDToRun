@@ -45,7 +45,10 @@ true | false) ;;
 *) die "HEADLESS_SSH must be 'true' or 'false'" ;;
 esac
 
-BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng dhcpcd"
+# No dhcpcd: IPv6 is disabled, so its only advantage over busybox udhcpc
+# (DHCPv6 in one process) is unused. ifupdown-ng's dhcp executor falls back to
+# udhcpc when dhcpcd is absent, and busybox ships the udhcpc helper script.
+BASE_PACKAGES="cloud-utils-growpart ca-certificates e2fsprogs-extra ifupdown-ng"
 if [ "$HEADLESS_SSH" = "true" ]; then
 	BASE_PACKAGES="$BASE_PACKAGES openssh"
 else

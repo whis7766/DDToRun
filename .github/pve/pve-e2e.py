@@ -263,9 +263,11 @@ def main() -> None:
     parser.add_argument("--tag", default="dd", help="release tag to download from")
     parser.add_argument("--asset", default="vpsvga", help="release asset name")
     parser.add_argument("--raw", type=pathlib.Path, help="use an existing raw image instead of downloading")
-    parser.add_argument("--vga", default="qxl", help="display adapter (qxl/std/cirrus/virtio/vmware/none)")
+    parser.add_argument("--vga", default="qxl",
+                        choices=["qxl", "std", "cirrus", "virtio", "vmware", "none"],
+                        help="display adapter")
     parser.add_argument("--disk-bus", default="scsi", choices=["scsi", "virtio"])
-    parser.add_argument("--memory", default="512", help="guest memory in MB")
+    parser.add_argument("--memory", default=512, type=int, help="guest memory in MB")
     parser.add_argument("--boot-wait", type=float, default=20.0, help="seconds to wait before capturing")
     parser.add_argument("--keep", action="store_true", help="keep the VM running for manual inspection")
     args = parser.parse_args()
@@ -286,7 +288,7 @@ def main() -> None:
     pve.wait_task(pve.upload("import", raw))
     import_source = f"{STORAGE}:import/{raw.name}"
 
-    vmid = create_vm(pve, args.disk_bus, args.vga, args.memory, import_source)
+    vmid = create_vm(pve, args.disk_bus, args.vga, str(args.memory), import_source)
     try:
         pve.wait_task(pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/start"))
         print(f"VM {vmid} booting ({args.vga}/{args.disk_bus}), waiting {args.boot_wait:.0f}s")

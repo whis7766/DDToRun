@@ -2,6 +2,7 @@
 # shellcheck disable=SC2034  # settings consumed by openrc-run, not by this file
 description="Download and run the business application"
 
+APP=/opt/business-app
 supervisor=supervise-daemon
 command=/usr/local/sbin/app-runner
 environment="APP_RUNNER_LOG_STDOUT_ONLY=1"
@@ -19,5 +20,7 @@ depend() {
 }
 
 pre_start() {
-	pkill -f '^/opt/business-app' 2>/dev/null || true
+	# Same path as app-runner's appPath; kill a stale process so the replacement
+	# can bind its ports.
+	pkill -f "^$APP" 2>/dev/null || true
 }

@@ -24,7 +24,6 @@ KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys
 PermitEmptyPasswords no
-ChallengeResponseAuthentication no
 X11Forwarding no
 PrintMotd no
 AcceptEnv LANG LC_*

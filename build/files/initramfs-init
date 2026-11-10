@@ -87,13 +87,11 @@ mkdir -p /sysroot
 _mount_opts=ro
 [ -n "$KOPT_rootflags" ] && _mount_opts="$KOPT_rootflags,ro"
 
-if [ -n "$KOPT_rootfstype" ]; then
-	mount -t "$KOPT_rootfstype" -o "$_mount_opts" "$root_dev" /sysroot
-else
-	mount -o "$_mount_opts" "$root_dev" /sysroot
-fi
-
-if [ $? -ne 0 ]; then
+# Build the optional -t argument once; an empty _type expands to nothing.
+_type=""
+[ -n "$KOPT_rootfstype" ] && _type="-t $KOPT_rootfstype"
+# shellcheck disable=SC2086
+if ! mount $_type -o "$_mount_opts" "$root_dev" /sysroot; then
 	echo "initramfs: failed to mount root" >/dev/kmsg
 	busybox sh
 fi
