@@ -1,4 +1,5 @@
 #!/sbin/openrc-run
+# shellcheck disable=SC2034  # settings consumed by openrc-run, not by this file
 description="Download and run the business application"
 
 supervisor=supervise-daemon

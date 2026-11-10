@@ -1,4 +1,5 @@
 #!/sbin/openrc-run
+# shellcheck disable=SC2034  # settings consumed by openrc-run, not by this file
 description="Grow root filesystem to fill the whole disk"
 
 depend() {
@@ -32,7 +33,7 @@ start() {
 		[ "$(cat "$STAMP" 2>/dev/null)" = "$DISK_SECTORS" ]; then
 		eend 0
 		return 0
-	}
+	fi
 
 	# growpart only extends when needed and exits non-zero with NOCHANGE when
 	# the partition already reaches the end of the disk; treat that as success
