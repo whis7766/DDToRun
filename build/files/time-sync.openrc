@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+description="Sync system clock via NTP once at boot"
+
+depend() {
+	need net
+}
+
+start() {
+	ebegin "Syncing time via NTP"
+	# busybox ntpd: -q queries once and exits, -n does not daemonize. A wrong
+	# clock breaks TLS for both app-runner and the business binary.
+	timeout 15 busybox ntpd -q -n \
+		-p ntp.aliyun.com -p ntp.tencent.com -p cn.ntp.org.cn >/dev/null 2>&1
+	eend 0
+}

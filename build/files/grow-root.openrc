@@ -1,0 +1,56 @@
+#!/sbin/openrc-run
+description="Grow root filesystem to fill the whole disk"
+
+depend() {
+	need localmount
+}
+
+start() {
+	ebegin "Growing root filesystem to fill disk"
+
+	ROOT_UUID=$(sed -n 's/.*root=UUID=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
+	ROOT_DEV=""
+	[ -n "$ROOT_UUID" ] && ROOT_DEV=$(findfs "UUID=$ROOT_UUID" 2>/dev/null || true)
+	[ -z "$ROOT_DEV" ] && ROOT_DEV=$(findmnt -no SOURCE / 2>/dev/null || true)
+	[ -n "$ROOT_DEV" ] || {
+		eend 0
+		return 0
+	}
+
+	DISK=$(echo "$ROOT_DEV" | sed 's/p\?[0-9]*$//')
+	PART_NUM=$(echo "$ROOT_DEV" | grep -oE '[0-9]+$')
+	[ -n "$PART_NUM" ] || {
+		eend 0
+		return 0
+	}
+
+	# Idempotent skip: the disk size is stamped only after a completed grow,
+	# so an unchanged disk returns instantly while a resized disk re-grows.
+	STAMP=/var/lib/grow-root.done
+	DISK_SECTORS=$(cat "/sys/class/block/$(basename "$DISK")/size" 2>/dev/null || true)
+	if [ -n "$DISK_SECTORS" ] && [ -f "$STAMP" ] &&
+		[ "$(cat "$STAMP" 2>/dev/null)" = "$DISK_SECTORS" ]; then
+		eend 0
+		return 0
+	}
+
+	# growpart only extends when needed and exits non-zero with NOCHANGE when
+	# the partition already reaches the end of the disk; treat that as success
+	# so equal-size images converge and still get the stamp.
+	growpart_out=$(growpart "$DISK" "$PART_NUM" 2>&1)
+	growpart_rc=$?
+	if [ "$growpart_rc" -ne 0 ] &&
+		! printf '%s\n' "$growpart_out" | grep -qi 'NOCHANGE'; then
+		eend 1
+		return 1
+	fi
+
+	if resize2fs "$ROOT_DEV" >/dev/null 2>&1; then
+		[ -n "$DISK_SECTORS" ] && echo "$DISK_SECTORS" >"$STAMP"
+	else
+		eend 1
+		return 1
+	fi
+
+	eend 0
+}

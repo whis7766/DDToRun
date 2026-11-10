@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+description="Download and run the business application"
+
+supervisor=supervise-daemon
+command=/usr/local/sbin/app-runner
+environment="APP_RUNNER_LOG_STDOUT_ONLY=1"
+command_user=root
+pidfile=/run/app-runner.pid
+output_log=/var/log/app-runner.log
+error_log=/var/log/app-runner.log
+
+depend() {
+	need net
+	after time-sync
+	# Soft dependency: ordered after sshd when it exists (headless), ignored
+	# in the kiosk profile where sshd is not installed.
+	use sshd
+}
+
+pre_start() {
+	pkill -f '^/opt/business-app' 2>/dev/null || true
+}
