@@ -358,11 +358,12 @@ func downloadOnce(rawURL, dest string) error {
 }
 
 // fetchApp downloads the binary with fixed retries and atomically replaces the
-// installed one. On total failure the existing binary is kept.
+// installed one. It reports whether a usable binary is in place when it returns
+// - a successful download, or an already-installed copy that was left alone.
 func fetchApp() bool {
 	if appURL == "" {
 		log.Println("no download URL baked in - skip download")
-		return false
+		return appPresent()
 	}
 	os.Remove(tmpPath)
 
@@ -395,9 +396,9 @@ func fetchApp() bool {
 	os.Remove(tmpPath)
 	if appPresent() {
 		statusf("using existing local app")
-	} else {
-		statusf("no local app available")
+		return true
 	}
+	statusf("no local app available")
 	return false
 }
 
@@ -465,7 +466,7 @@ func stdoutIsTerminal() bool {
 // prepareBeforeExec clears the console and kills any stale business process so
 // the replacement can bind its ports.
 func prepareBeforeExec() {
-	_ = exec.Command("pkill", "-f", "^/opt/business-app").Run()
+	_ = exec.Command("pkill", "-f", "^"+appPath).Run()
 	if stdoutIsTerminal() {
 		fmt.Print("\033[2J\033[H\033[?25l")
 	}
@@ -483,8 +484,7 @@ func main() {
 	log.Println("app-runner starting")
 
 	for {
-		fetchApp()
-		if appPresent() {
+		if fetchApp() {
 			log.Println("running", appPath)
 			prepareBeforeExec()
 			if err := execApp(); err != nil {

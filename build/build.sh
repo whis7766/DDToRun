@@ -67,11 +67,12 @@ PART_DEV=""
 
 cleanup() {
 	detach_loop
-	if [ "${KEEP_WORK:-false}" != "true" ]; then
-		rm -rf "$WORK"
-	fi
+	[ "${KEEP_WORK:-false}" = "true" ] || rm -rf "$WORK"
 }
-trap cleanup EXIT INT TERM
+# Signals only raise the exit status; cleanup itself is owned by the EXIT trap so
+# a loop device can never be left behind by a double invocation.
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 log "profile: HEADLESS_SSH=$HEADLESS_SSH branch=$ALPINE_BRANCH kernel=$KERNEL_FLAVOR"
 
