@@ -1,176 +1,308 @@
 #!/usr/bin/env python3
-"""PVE real-machine boot test, self-contained for GitHub Actions.
+"""PVE real-machine boot test for a release image.
 
-Flow: download a release asset (private repo, via GITHUB_TOKEN), decompress the
-zstd image, upload it through the PVE content=import channel, create a VM with
-import-from (chosen display adapter + disk bus), boot it, capture the screen
-over an SSH VNC tunnel, then tear the VM down. Credentials come from env vars.
+Flow: obtain a raw image (download a release asset, or use a local file) ->
+upload it through the tenant ``content=import`` channel -> create a VM with
+``import-from`` (chosen display adapter and disk bus) -> boot it -> capture the
+screen over an SSH VNC tunnel -> tear the VM down.
+
+The tenant API does not expose importdisk / import-volume / screendump, so the
+import channel plus a direct-tcpip VNC tunnel are the only paths available.
+Credentials come from the environment; nothing is hard-coded.
+
+Typical use on the PVE host itself, with an image already on disk:
+
+    ./pve-e2e.py --raw ~/images/import/vpsvga.raw --vga qxl --disk-bus scsi
 """
-import argparse, io, os, pathlib, select, socket, subprocess, sys, threading, time
 
-import requests
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import os
+import pathlib
+import select
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+import time
+
 import paramiko
-import zstandard as zstd
+import requests
+import zstandard
 
+NODE = "pve"
+STORAGE = "tenant-private"
+POOL = "tenant-pool"
 HERE = pathlib.Path(__file__).resolve().parent
 OUT = HERE / "out"
-OUT.mkdir(parents=True, exist_ok=True)
 
 
-def env(name):
-    v = os.environ.get(name)
-    if not v:
-        sys.exit(f"missing required env {name}")
-    return v
+# --- environment -----------------------------------------------------------
+def env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        sys.exit(f"missing required environment variable {name}")
+    return value
 
 
+def normalize_fingerprint(value: str) -> str:
+    return value.replace(":", "").replace(" ", "").lower()
+
+
+def verify_server_fingerprint(host: str, port: int, expected: str) -> None:
+    """Compare the API server certificate against PVE_TLS_FP when provided."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, port), timeout=15) as raw:
+        with ctx.wrap_socket(raw, server_hostname=host) as tls:
+            der = tls.getpeercert(binary_form=True)
+    digest = hashlib.sha256(der).hexdigest()
+    if digest != normalize_fingerprint(expected):
+        sys.exit(f"TLS fingerprint mismatch: got {digest}, expected {expected}")
+
+
+# --- PVE API ---------------------------------------------------------------
 class PVE:
-    def __init__(self):
-        host = env("PVE_HOST"); port = env("PVE_API_PORT"); user = env("PVE_USER")
-        self.base = f"https://{host}:{port}/api2/json"
-        self.s = requests.Session(); self.s.verify = False
-        r = self.s.post(f"{self.base}/access/ticket",
-                        data={"username": user, "password": env("PVE_API_PASS")})
-        r.raise_for_status()
-        d = r.json()["data"]
-        self.ticket = d["ticket"]; self.csrf = d["CSRFPreventionToken"]
-        self.s.cookies.set("PVEAuthCookie", self.ticket)
-        self.s.headers["CSRFPreventionToken"] = self.csrf
+    """Minimal PVE API client bound to one tenant session."""
 
-    def call(self, method, path, **params):
-        r = self.s.request(method, f"{self.base}{path}", data=params or None)
-        if r.status_code >= 400:
-            raise RuntimeError(f"{method} {path} -> {r.status_code} {r.text[:300]}")
-        return r.json()["data"]
+    def __init__(self, base: str, user: str, password: str):
+        self.base = base
+        self.http = requests.Session()
+        self.http.verify = False
+        resp = self.http.post(
+            f"{base}/access/ticket", data={"username": user, "password": password}
+        )
+        resp.raise_for_status()
+        data = resp.json()["data"]
+        self.http.cookies.set("PVEAuthCookie", data["ticket"])
+        self.http.headers["CSRFPreventionToken"] = data["CSRFPreventionToken"]
 
-    def upload(self, node, storage, content, filepath):
-        with open(filepath, "rb") as f:
-            r = self.s.post(
-                f"{self.base}/nodes/{node}/storage/{storage}/upload",
-                files={"filename": (pathlib.Path(filepath).name, f)},
-                data={"content": content})
-        if r.status_code >= 400:
-            raise RuntimeError(f"upload -> {r.status_code} {r.text[:300]}")
-        return r.json()["data"]
+    def call(self, method: str, path: str, **params):
+        resp = self.http.request(method, f"{self.base}{path}", data=params or None)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"{method} {path} -> {resp.status_code} {resp.text[:300]}")
+        return resp.json()["data"]
 
-    def wait_task(self, upid, timeout=300):
+    def upload(self, content: str, filepath: pathlib.Path):
+        with filepath.open("rb") as handle:
+            resp = self.http.post(
+                f"{self.base}/nodes/{NODE}/storage/{STORAGE}/upload",
+                files={"filename": (filepath.name, handle)},
+                data={"content": content},
+            )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"upload -> {resp.status_code} {resp.text[:300]}")
+        return resp.json()["data"]
+
+    def wait_task(self, upid, timeout: float = 300.0) -> None:
         if not (isinstance(upid, str) and upid.startswith("UPID")):
             return
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            st = self.call("GET", f"/nodes/pve/tasks/{upid}/status")
-            if st.get("status") in ("stopped",):
-                if st.get("exitstatus") and st["exitstatus"] != "OK":
-                    raise RuntimeError(f"task failed: {st['exitstatus']}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = self.call("GET", f"/nodes/{NODE}/tasks/{upid}/status")
+            if status.get("status") == "stopped":
+                exit_status = status.get("exitstatus")
+                if exit_status and exit_status != "OK":
+                    raise RuntimeError(f"task failed: {exit_status}")
                 return
             time.sleep(1.5)
-        raise TimeoutError(upid)
+        raise TimeoutError(f"task {upid} did not finish in {timeout}s")
 
 
-def download_asset(tag, asset):
+# --- image acquisition -----------------------------------------------------
+def download_asset(tag: str, asset: str, dest: pathlib.Path) -> pathlib.Path:
+    """Download a release asset and decompress it to dest (raw)."""
     token = env("GITHUB_TOKEN")
     repo = env("GITHUB_REPOSITORY")
-    h = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-    rel = requests.get(
-        f"https://api.github.com/repos/{repo}/releases/tags/{tag}", headers=h)
-    rel.raise_for_status()
-    obj = next((a for a in rel.json()["assets"] if a["name"] == asset), None)
-    if not obj:
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+
+    release = requests.get(
+        f"https://api.github.com/repos/{repo}/releases/tags/{tag}", headers=headers
+    )
+    release.raise_for_status()
+    obj = next((a for a in release.json()["assets"] if a["name"] == asset), None)
+    if obj is None:
         sys.exit(f"asset {asset} not found in release {tag}")
-    ar = requests.get(obj["url"], headers={**h, "Accept": "application/octet-stream"})
-    ar.raise_for_status()
-    comp = pathlib.Path(OUT / f"{asset}.zst")
-    comp.write_bytes(ar.content)
-    raw = pathlib.Path(OUT / f"{asset}.raw")
-    with open(comp, "rb") as fi, open(raw, "wb") as fo:
-        zstd.ZstdDecompressor().copy_stream(fi, fo)
-    return raw
+
+    compressed = dest.with_suffix(".zst")
+    with requests.get(
+        obj["url"], headers={**headers, "Accept": "application/octet-stream"}, stream=True
+    ) as resp:
+        resp.raise_for_status()
+        with compressed.open("wb") as handle:
+            for block in resp.iter_content(chunk_size=1 << 20):
+                handle.write(block)
+
+    with compressed.open("rb") as src, dest.open("wb") as dst:
+        zstandard.ZstdDecompressor().copy_stream(src, dst)
+    compressed.unlink()
+    return dest
 
 
-def vnc_capture(pve, vmid, host, ssh_port, user, ssh_pass, out_png):
-    vp = pve.call("POST", f"/nodes/pve/qemu/{vmid}/vncproxy")
-    port, ticket = int(vp["port"]), vp["ticket"]
-    tr = paramiko.Transport((host, ssh_port)); tr.connect(username=user, password=ssh_pass)
-    local_port = 5910; stop = threading.Event()
+# --- screen capture --------------------------------------------------------
+@contextlib.contextmanager
+def ssh_vnc_tunnel(vnc_port: int, local_port: int = 5910):
+    """Expose the node-local VNC port through a direct-tcpip SSH channel.
 
-    def bridge(cs):
-        ch = tr.open_channel("direct-tcpip", ("127.0.0.1", port),
-                             ("127.0.0.1", local_port))
-        while True:
-            r, _, _ = select.select([cs, ch], [], [])
-            if cs in r:
-                d = cs.recv(4096)
-                if not d: break
-                ch.sendall(d)
-            if ch in r:
-                d = ch.recv(4096)
-                if not d: break
-                cs.sendall(d)
-        ch.close(); cs.close()
+    paramiko's request_port_forward is denied on this host, but the lower-level
+    direct-tcpip channel works.
+    """
+    transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
+    transport.connect(username=env("PVE_USER"), password=env("PVE_SSH_PASS"))
 
-    srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", local_port)); srv.listen(5); srv.settimeout(1)
+    stop = threading.Event()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", local_port))
+    server.listen(5)
+    server.settimeout(1)
 
-    def loop():
+    def pump(client: socket.socket) -> None:
+        channel = transport.open_channel(
+            "direct-tcpip", ("127.0.0.1", vnc_port), ("127.0.0.1", local_port)
+        )
+        try:
+            while True:
+                readable, _, _ = select.select([client, channel], [], [])
+                if client in readable:
+                    data = client.recv(4096)
+                    if not data:
+                        break
+                    channel.sendall(data)
+                if channel in readable:
+                    data = channel.recv(4096)
+                    if not data:
+                        break
+                    client.sendall(data)
+        finally:
+            channel.close()
+            client.close()
+
+    def accept_loop() -> None:
         while not stop.is_set():
-            try: c, _ = srv.accept()
-            except socket.timeout: continue
-            threading.Thread(target=bridge, args=(c,), daemon=True).start()
-    threading.Thread(target=loop, daemon=True).start(); time.sleep(0.5)
-    rc = subprocess.run(["vncdo", "-s", f"127.0.0.1::{local_port}", "-p", ticket,
-                         "capture", str(out_png)], capture_output=True, timeout=90).returncode
-    stop.set(); srv.close(); tr.close()
-    return rc
+            try:
+                client, _ = server.accept()
+            except socket.timeout:
+                continue
+            threading.Thread(target=pump, args=(client,), daemon=True).start()
+
+    threading.Thread(target=accept_loop, daemon=True).start()
+    time.sleep(0.5)
+    try:
+        yield local_port
+    finally:
+        stop.set()
+        server.close()
+        transport.close()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--tag", required=True); ap.add_argument("--asset", required=True)
-    ap.add_argument("--vga", default="qxl"); ap.add_argument("--disk-bus", default="scsi")
-    ap.add_argument("--memory", default="512")
-    a = ap.parse_args()
+def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path) -> int:
+    proxy = pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/vncproxy")
+    with ssh_vnc_tunnel(int(proxy["port"])) as local_port:
+        result = subprocess.run(
+            ["vncdo", "-s", f"127.0.0.1::{local_port}", "-p", proxy["ticket"],
+             "capture", str(out_png)],
+            capture_output=True,
+            timeout=90,
+        )
+    return result.returncode
 
-    node = "pve"; storage = "tenant-private"; pool = "tenant-pool"
-    raw = download_asset(a.tag, a.asset)
-    pve = PVE()
 
-    # import source through the tenant import channel
-    upid = pve.upload(node, storage, "import", raw)
-    pve.wait_task(upid)
-    src = f"{storage}:import/{raw.name}"
+# --- VM lifecycle ----------------------------------------------------------
+def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str) -> str:
     vmid = pve.call("GET", "/cluster/nextid")
-
-    vm = dict(vmid=vmid, pool=pool, name=f"ci-{a.vga}-{a.disk_bus}",
-              memory=a.memory, cores=1, ostype="l26",
-              net0="virtio,bridge=vmbr0", machine="q35", bios="seabios",
-              onboot=0, agent="0", tablet=0)
-    if a.disk_bus == "scsi":
-        vm["scsihw"] = "virtio-scsi-single"
-        vm["scsi0"] = f"{storage}:0,import-from={src}"
-        vm["boot"] = "order=scsi0"
+    config = dict(
+        vmid=vmid,
+        pool=POOL,
+        name=f"ci-{vga}-{disk_bus}",
+        memory=memory,
+        cores=1,
+        ostype="l26",
+        net0="virtio,bridge=vmbr0",
+        machine="q35",
+        bios="seabios",
+        onboot=0,
+        agent=0,
+        tablet=0,
+        vga=vga,
+    )
+    if disk_bus == "scsi":
+        config.update(
+            scsihw="virtio-scsi-single",
+            scsi0=f"{STORAGE}:0,import-from={import_source}",
+            boot="order=scsi0",
+        )
     else:
-        vm["virtio0"] = f"{storage}:0,import-from={src}"
-        vm["boot"] = "order=virtio0"
-    vm["vga"] = a.vga
+        config.update(
+            virtio0=f"{STORAGE}:0,import-from={import_source}",
+            boot="order=virtio0",
+        )
+    pve.wait_task(pve.call("POST", f"/nodes/{NODE}/qemu", **config))
+    return str(vmid)
 
-    pve.wait_task(pve.call("POST", "/nodes/pve/qemu", **vm))
-    pve.wait_task(pve.call("POST", f"/nodes/pve/qemu/{vmid}/status/start"))
-    print(f"VM {vmid} booting ({a.vga}/{a.disk_bus}); waiting for console...")
-    time.sleep(20)
-    png = OUT / f"screen-{a.vga}-{a.disk_bus}.png"
-    rc = vnc_capture(pve, vmid, env("PVE_HOST"), int(env("PVE_SSH_PORT")),
-                     env("PVE_USER"), env("PVE_SSH_PASS"), png)
-    print("capture rc:", rc, "png:", png, png.exists())
 
-    # teardown to respect the tenant memory cap
-    try: pve.call("POST", f"/nodes/pve/qemu/{vmid}/status/stop")
-    except Exception: pass
+def teardown(pve: PVE, vmid: str) -> None:
+    with contextlib.suppress(Exception):
+        pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/stop")
     time.sleep(3)
-    pve.call("DELETE", f"/nodes/pve/qemu/{vmid}")
-    print("teardown complete")
+    with contextlib.suppress(Exception):
+        pve.call("DELETE", f"/nodes/{NODE}/qemu/{vmid}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tag", default="dd", help="release tag to download from")
+    parser.add_argument("--asset", default="vpsvga", help="release asset name")
+    parser.add_argument("--raw", type=pathlib.Path, help="use an existing raw image instead of downloading")
+    parser.add_argument("--vga", default="qxl", help="display adapter (qxl/std/cirrus/virtio/vmware/none)")
+    parser.add_argument("--disk-bus", default="scsi", choices=["scsi", "virtio"])
+    parser.add_argument("--memory", default="512", help="guest memory in MB")
+    parser.add_argument("--boot-wait", type=float, default=20.0, help="seconds to wait before capturing")
+    parser.add_argument("--keep", action="store_true", help="keep the VM running for manual inspection")
+    args = parser.parse_args()
+
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    fingerprint = os.environ.get("PVE_TLS_FP")
+    if fingerprint:
+        verify_server_fingerprint(env("PVE_HOST"), int(env("PVE_API_PORT")), fingerprint)
+
+    pve = PVE(
+        base=f"https://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json",
+        user=env("PVE_USER"),
+        password=env("PVE_API_PASS"),
+    )
+
+    raw = args.raw or download_asset(args.tag, args.asset, OUT / args.asset)
+    pve.wait_task(pve.upload("import", raw))
+    import_source = f"{STORAGE}:import/{raw.name}"
+
+    vmid = create_vm(pve, args.disk_bus, args.vga, args.memory, import_source)
+    try:
+        pve.wait_task(pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/start"))
+        print(f"VM {vmid} booting ({args.vga}/{args.disk_bus}), waiting {args.boot_wait:.0f}s")
+        time.sleep(args.boot_wait)
+
+        png = OUT / f"screen-{args.vga}-{args.disk_bus}.png"
+        rc = capture_screen(pve, vmid, png)
+        print(f"capture rc={rc} png={png} exists={png.exists()}")
+        if rc != 0:
+            sys.exit(f"screen capture failed (rc={rc})")
+    finally:
+        if args.keep:
+            print(f"keeping VM {vmid}")
+        else:
+            teardown(pve, vmid)
+            print("teardown complete")
 
 
 if __name__ == "__main__":
     import urllib3
+
     urllib3.disable_warnings()
     main()

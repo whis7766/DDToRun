@@ -1,6 +1,9 @@
 # Build output (raw image, zstd, checksum)
 dist/
 
+# PVE test output (screenshots, downloaded assets)
+.github/pve/out/
+
 # Vendored binaries downloaded at build time (not committed)
 build/vendor/app-runner
 build/vendor/app-runner.exe
