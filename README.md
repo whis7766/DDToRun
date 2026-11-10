@@ -79,7 +79,9 @@ HEADLESS_SSH=true  bash build/build.sh   # vpsssh
 
 **initramfs 只装 busybox。** 官方 init 走 `nlplug-findfs`（依赖 libcryptsetup），base 特色还带 `apk`，两者会把整套 OpenSSL/device-mapper 拖进来；换成 busybox 后，独立 `kmod` 又因为支持压缩模块直接依赖 libcrypto。最终做法是自定义 `tiny` 特色 + 只用 busybox 的 `modprobe`/`mdev`，initramfs 从 5.43 MB 降到 3.01 MB。
 
-**app-runner 不用 net/http。** `net/http` 会连带 HTTP/2 和整套 transport 抽象。改成 `crypto/tls` 上手写最小 HTTP/1.1：单流 GET、最多 10 次重定向、chunked 与 Content-Length、读超时 30s 的 stall 看门狗、固定 6 次重试、最小环境变量 `exec`。当前静态二进制 3.96 MB（4,149,400 字节）。
+**app-runner 不用 net/http。** `net/http` 会连带 HTTP/2 和整套 transport 抽象。改成 `crypto/tls` 上手写最小 HTTP/1.1：单流 GET、最多 10 次重定向、chunked 与 Content-Length、读超时 30s 的 stall 看门狗、固定 6 次重试、最小环境变量 `exec`。
+
+**体积由 Go 版本决定，不是编译开关。** 同一份源码用 go1.27.1、`GOAMD64=v3`、`-s -w` 实测：不加任何 `GOEXPERIMENT` 是 4,845,728 字节，只加 `newinliner` 是 4,858,016，当前完整组合是 4,849,824 —— `simd` / `greenteagc` / `sizespecializedmalloc` 对体积没有影响，`newinliner` 反而 +12 KB（换内联质量，保留）。同一源码用 go1.23 编是 4,149,400 字节，那 700 KB 的差距来自 1.24 之后的运行时，调 flags 拿不回来。`-buildid=` 只省 36 字节。
 
 ## 约束
 
