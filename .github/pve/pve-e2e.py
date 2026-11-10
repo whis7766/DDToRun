@@ -216,6 +216,52 @@ def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path) -> int:
     return result.returncode
 
 
+def serial_check(vmid: str, timeout: float = 60.0) -> None:
+    """Log in over the platform-bridged serial socket and run a sanity command.
+
+    The platform maps the guest serial0 socket to ``~/serial-<vmid>.sock``
+    (mode 666); ``socat`` bridges it to ``/var/run/qemu-server/<vmid>.serial0``.
+    The guest runs a getty on ttyS0, so this is an interactive second channel
+    alongside the VNC capture. The appliance ships an empty root password.
+    """
+    transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
+    transport.connect(username=env("PVE_USER"), password=env("PVE_SSH_PASS"))
+    chan = transport.open_session()
+    chan.settimeout(5)
+    chan.exec_command(f"socat - UNIX-CONNECT:$HOME/serial-{vmid}.sock 2>&1")
+
+    def read_until(marker: str, deadline: float) -> str:
+        buf = ""
+        while time.monotonic() < deadline:
+            try:
+                data = chan.recv(4096).decode(errors="replace")
+            except socket.timeout:
+                continue
+            if not data:
+                break
+            buf += data
+            if marker in buf:
+                return buf
+        raise RuntimeError(f"serial: waited for {marker!r}, tail={buf[-200:]!r}")
+
+    deadline = time.monotonic() + timeout
+    read_until("login:", deadline)
+    chan.sendall("root\n")
+    read_until("Password:", deadline)
+    chan.sendall("\n")
+    read_until("#", deadline)
+
+    chan.sendall("uname -a\n")
+    out = read_until("#", deadline)
+    lines = [line.strip() for line in out.splitlines() if "Linux" in line]
+    if not lines:
+        raise RuntimeError(f"serial: uname output missing Linux: {out[-200:]!r}")
+    print(f"serial console: login OK, uname -> {lines[0]}")
+
+    chan.close()
+    transport.close()
+
+
 # --- VM lifecycle ----------------------------------------------------------
 def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str) -> str:
     vmid = pve.call("GET", "/cluster/nextid")
@@ -234,6 +280,11 @@ def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str
         tablet=0,
         vga=vga,
         serial0="socket",
+        # The app-runner binary is built GOAMD64=v3; the default kvm64 baseline
+        # lacks the v3 instruction set and refuses to run ("only be run on
+        # AMD64 processors with v3 microarchitecture support"). host passes the
+        # actual hypervisor CPU through.
+        cpu="host",
     )
     if disk_bus == "scsi":
         config.update(
@@ -270,6 +321,7 @@ def main() -> None:
     parser.add_argument("--disk-bus", default="scsi", choices=["scsi", "virtio"])
     parser.add_argument("--memory", default=512, type=int, help="guest memory in MB")
     parser.add_argument("--boot-wait", type=float, default=20.0, help="seconds to wait before capturing")
+    parser.add_argument("--skip-serial", action="store_true", help="do not drive the serial console")
     parser.add_argument("--keep", action="store_true", help="keep the VM running for manual inspection")
     args = parser.parse_args()
 
@@ -300,6 +352,9 @@ def main() -> None:
         print(f"capture rc={rc} png={png} exists={png.exists()}")
         if rc != 0:
             sys.exit(f"screen capture failed (rc={rc})")
+
+        if not args.skip_serial:
+            serial_check(vmid)
     finally:
         if args.keep:
             print(f"keeping VM {vmid}")
