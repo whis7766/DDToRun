@@ -295,7 +295,7 @@ def guest_ip_by_mac(mac: str, timeout: float = 180.0) -> str:
     def shell(cmd: str) -> str:
         chan = transport.open_session()
         chan.exec_command(cmd)
-        out = chan.makefile("r", 65536).read()
+        out = chan.makefile("r", 65536).read().decode(errors="replace")
         chan.recv_exit_status()
         chan.close()
         return out
