@@ -212,6 +212,55 @@ def ssh_vnc_tunnel(vnc_port: int, local_port: int = 5910):
         transport.close()
 
 
+def reset_storm(pve: PVE, vmid: str, rounds: int = 3) -> None:
+    """Reset the VM while the app download is in progress, every round.
+
+    A reset (the platform's reset button, not a power cut) used to leave the
+    root filesystem with an entry preen-mode fsck could not decide on, so the
+    next boot hung before networking came up. This reproduces that scenario:
+    wait until the download is visibly underway, reset, repeat, then run the
+    normal headless contract on the final boot.
+    """
+    mac = pve.call("GET", f"/nodes/{NODE}/qemu/{vmid}/config")["net0"].split("=")[1].split(",")[0]
+    key = paramiko.Ed25519Key.from_private_key_file(
+        str(HERE.parents[1] / "build" / "vendor" / "ssh_user_key")
+    )
+    for rnd in range(1, rounds + 1):
+        deadline = time.monotonic() + 120
+        info = ""
+        while time.monotonic() < deadline:
+            try:
+                ip = guest_ip_by_mac(mac, 30)
+                channel = pve_ssh_channel(ip, 22)
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(ip, 22, username="root", pkey=key, sock=channel,
+                               timeout=10, allow_agent=False, look_for_keys=False)
+                _in, out, _err = client.exec_command(
+                    "stat -c %s /opt/business-app.tmp 2>/dev/null || echo 0"
+                )
+                size = int(out.read().strip() or 0)
+                _in, out, _err = client.exec_command("cut -d. -f1 /proc/uptime")
+                uptime = out.read().decode().strip()
+                client.close()
+                if size > 2 * 1024 * 1024:
+                    info = f"tmp={size}B uptime={uptime}s"
+                    break
+            except (SystemExit, ValueError, paramiko.SSHException, OSError):
+                time.sleep(3)
+        if not info:
+            sys.exit(f"reset storm: round {rnd} never reached an active download")
+        print(f"reset storm round {rnd}/{rounds}: {info} -> reset signal")
+        pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/reset")
+
+
+def pve_ssh_channel(ip: str, port: int):
+    """Open a direct-tcpip channel through the PVE host SSH transport."""
+    transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
+    transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
+    return transport.open_channel("direct-tcpip", (ip, port), ("127.0.0.1", 0), timeout=8)
+
+
 def headless_check(pve: PVE, vmid: str, timeout: float = 180.0) -> None:
     """Log in with the baked user key and assert the headless boot contract.
 
@@ -461,6 +510,8 @@ def main() -> None:
                         help="drive the serial console (debug builds only; production images ship no ttyS0 getty)")
     parser.add_argument("--ssh", action="store_true",
                         help="assert the headless contract: key login, sshd + app-runner started, single log line")
+    parser.add_argument("--reset-storm", type=int, default=0, metavar="N",
+                        help="reset N times while the app download is in progress, then run the headless contract")
     parser.add_argument("--keep", action="store_true", help="keep the VM running for manual inspection")
     args = parser.parse_args()
 
@@ -495,6 +546,9 @@ def main() -> None:
 
         if args.serial:
             serial_check(vmid)
+        if args.reset_storm:
+            reset_storm(pve, vmid, args.reset_storm)
+            headless_check(pve, vmid)
         if args.ssh:
             headless_check(pve, vmid)
     finally:

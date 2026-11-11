@@ -42,6 +42,22 @@ done
 # VGA kiosk or SSH, not ttyS0. No ttyS0 getty is added and the kernel keeps its
 # default console (tty0).
 
+# Boot-time filesystem repair. The default preen mode (-p) aborts on any
+# inconsistency it cannot decide on its own (e.g. a directory entry left
+# pointing at an invalid inode after a reset or power loss mid-write), which
+# drops the box at a repair prompt with no network - verified reproducible by
+# resetting the VM while the app download is in progress. This appliance has
+# no operator console, so answer "yes" to every repair instead of hanging.
+cat >/etc/conf.d/fsck <<'EOF'
+# Auto-repair every filesystem listed in fstab; the default preen mode aborts
+# on inconsistencies that need a decision, which would leave the box hung.
+fsck_args="-A -y"
+fsck_on_battery="YES"
+fsck_shutdown="NO"
+# Keep the abort as a last resort for errors fsck cannot repair at all.
+fsck_abort_on_errors="YES"
+EOF
+
 if [ "$PROFILE" = "headless" ]; then
 	# Headless: no VGA login at all, access is over SSH.
 	sed -i 's|^tty[1-6]::respawn:.*|#&|' /etc/inittab
