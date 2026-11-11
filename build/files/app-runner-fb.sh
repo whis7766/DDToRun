@@ -59,5 +59,8 @@ FONT=$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)
 printf '\033c' 2>/dev/null || true
 printf '\033[2J\033[H' 2>/dev/null || true
 
+# --progress=inline is what makes the runner redraw one progress line instead
+# of appending one per tick; it cannot be inferred here because stdout is the
+# pipe to tee, not a terminal.
 exec "$FBTERM" -f "$FONT" -s 22 -- \
-	sh -c 'exec /usr/local/sbin/app-runner 2>&1 | tee -a /var/log/app-runner.log'
+	sh -c 'exec /usr/local/sbin/app-runner --progress=inline 2>&1 | tee -a /var/log/app-runner.log'

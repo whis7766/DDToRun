@@ -42,6 +42,13 @@ var (
 	appPath = "/opt/business-app"
 	tmpPath = "/opt/business-app.tmp"
 	appURL  = "https://furryfree.pages.dev/release?token=jaJ81HfL&filename=subs-check_linux_amd64v3&tag=ctyun"
+
+	// progressInline redraws one line with a carriage return, which is what the
+	// kiosk wants on the framebuffer. It is selected by an explicit flag rather
+	// than by inspecting stdout: the kiosk pipes the runner through tee, so
+	// stdout is a pipe there too and tty detection would get it wrong. In the
+	// service profile stdout is a log file and the line mode keeps it readable.
+	progressInline bool
 )
 
 // errTooManyRedirects bounds the redirect chain.
@@ -420,12 +427,11 @@ func (p *progress) run(stop <-chan struct{}) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	// On a real terminal the carriage return overwrites one line; redirected
-	// to a log file or pipe, \r never starts a new line, so fall back to \n to
-	// keep the log readable instead of one giant line.
-	nl := "\r"
-	if !stdoutIsTerminal() {
-		nl = "\n"
+	// The kiosk redraws a single progress line; the log line mode always starts
+	// a new line, so a service log stays readable.
+	nl := "\n"
+	if progressInline {
+		nl = "\r"
 	}
 
 	lastBytes := int64(0)
@@ -459,19 +465,12 @@ func megabytes(n int64) float64 { return float64(n) / 1048576 }
 
 // --- execution -------------------------------------------------------------
 
-func stdoutIsTerminal() bool {
-	st, err := os.Stdout.Stat()
-	if err != nil {
-		return false
-	}
-	return st.Mode()&os.ModeCharDevice != 0
-}
-
 // prepareBeforeExec clears the console and kills any stale business process so
-// the replacement can bind its ports.
+// the replacement can bind its ports. The clear only makes sense when the
+// console is owned by the kiosk launcher, i.e. in inline mode.
 func prepareBeforeExec() {
 	_ = exec.Command("pkill", "-f", "^"+appPath).Run()
-	if stdoutIsTerminal() {
+	if progressInline {
 		fmt.Print("\033[2J\033[H\033[?25l")
 	}
 }
@@ -483,7 +482,16 @@ func execApp() error {
 	return syscall.Exec(appPath, []string{appPath}, env)
 }
 
+func parseArgs(args []string) {
+	for _, arg := range args {
+		if arg == "--progress=inline" {
+			progressInline = true
+		}
+	}
+}
+
 func main() {
+	parseArgs(os.Args[1:])
 	log.SetOutput(openLog())
 	log.Println("app-runner starting")
 
