@@ -77,6 +77,19 @@ tune_ext4() {
 	[ "$_rc" -le 1 ] || die "e2fsck failed with code $_rc"
 
 	zerofree "$1" >/dev/null 2>&1 || true
+
+	# zerofree is the last offline step before export. Repair once more so any
+	# inode/block bitmap or directory-index inconsistency left by the offline
+	# tuning is cleared, then gate on a read-only check: a dirty filesystem
+	# must never ship (a stray allocated-but-freed inode is later reused at
+	# boot, surfacing as an fsck abort and a read-only root).
+	_rc=0
+	e2fsck -fyD "$1" >/dev/null 2>&1 || _rc=$?
+	[ "$_rc" -le 1 ] || die "e2fsck failed with code $_rc"
+
+	_rc=0
+	e2fsck -fn "$1" >/dev/null 2>&1 || _rc=$?
+	[ "$_rc" -eq 0 ] || die "shipped filesystem still inconsistent (e2fsck -fn code $_rc)"
 }
 
 # export_image <raw> <dist_dir> - copy the raw image plus its checksum.
