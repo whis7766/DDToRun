@@ -13,9 +13,9 @@
 #   true             headless  - sshd on port 22 (key-only), app supervised in
 #                    the background; accessed over SSH.
 #
-# Both profiles keep a serial console on ttyS0 (115200 8N1): the platform
-# bridges the VM serial0 socket to a tenant-owned unix socket, which is the
-# interactive debug path and needs no root.
+# Both profiles ship no serial console: the appliance is reached over VGA
+# kiosk (vpsvga) or SSH (vpsssh). A ttyS0 getty/console is a debug-only aid
+# and is intentionally not baked into production images.
 #
 # Environment (all optional):
 #   APP_URL        business binary URL compiled into app-runner
@@ -107,7 +107,6 @@ HEADLESS_SSH="$HEADLESS_SSH" APP_URL="$APP_URL" \
 	--kernel-flavor "$KERNEL_FLAVOR" \
 	--rootfs ext4 \
 	--packages "$PACKAGES" \
-	--serial-console \
 	--script-chroot \
 	"$PART_DEV" \
 	"$SCRIPT_DIR/setup.sh"

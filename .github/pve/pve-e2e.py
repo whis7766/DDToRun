@@ -284,7 +284,8 @@ def serial_check(vmid: str, timeout: float = 60.0) -> None:
 
 
 # --- VM lifecycle ----------------------------------------------------------
-def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str) -> str:
+def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str,
+              serial: bool = False) -> str:
     vmid = pve.call("GET", "/cluster/nextid")
     config = dict(
         vmid=vmid,
@@ -300,13 +301,14 @@ def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str
         agent=0,
         tablet=0,
         vga=vga,
-        serial0="socket",
         # The app-runner binary is built GOAMD64=v3; the default kvm64 baseline
         # lacks the v3 instruction set and refuses to run ("only be run on
         # AMD64 processors with v3 microarchitecture support"). host passes the
         # actual hypervisor CPU through.
         cpu="host",
     )
+    if serial:
+        config["serial0"] = "socket"
     if disk_bus == "scsi":
         config.update(
             scsihw="virtio-scsi-single",
@@ -342,7 +344,8 @@ def main() -> None:
     parser.add_argument("--disk-bus", default="scsi", choices=["scsi", "virtio"])
     parser.add_argument("--memory", default=512, type=int, help="guest memory in MB")
     parser.add_argument("--boot-wait", type=float, default=20.0, help="seconds to wait before capturing")
-    parser.add_argument("--skip-serial", action="store_true", help="do not drive the serial console")
+    parser.add_argument("--serial", action="store_true",
+                        help="drive the serial console (debug builds only; production images ship no ttyS0 getty)")
     parser.add_argument("--keep", action="store_true", help="keep the VM running for manual inspection")
     args = parser.parse_args()
 
@@ -362,7 +365,8 @@ def main() -> None:
     pve.wait_task(pve.upload("import", raw))
     import_source = f"{STORAGE}:import/{raw.name}"
 
-    vmid = create_vm(pve, args.disk_bus, args.vga, str(args.memory), import_source)
+    vmid = create_vm(pve, args.disk_bus, args.vga, str(args.memory), import_source,
+                     serial=args.serial)
     try:
         pve.wait_task(pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/start"))
         print(f"VM {vmid} booting ({args.vga}/{args.disk_bus}), waiting {args.boot_wait:.0f}s")
@@ -374,7 +378,7 @@ def main() -> None:
         if rc != 0:
             sys.exit(f"screen capture failed (rc={rc})")
 
-        if not args.skip_serial:
+        if args.serial:
             serial_check(vmid)
     finally:
         if args.keep:
