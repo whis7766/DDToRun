@@ -7,11 +7,19 @@ setup-hostname vps-app
 # the base rootfs, and the kiosk stage runs before the app stage.
 install -d -m 0755 /opt /usr/local/sbin /var/log
 
-# Lock the root account. Production entry is the public-key login (headless) or
-# the kiosk launcher (kiosk); the base rootfs ships an empty password field,
-# which must never reach a production image. Locking the password does not
-# disable public-key authentication.
-passwd -l root 2>/dev/null || sed -i 's/^root:[^:]*:/root:!:/' /etc/shadow
+# Root account password. The base rootfs ships an empty password field, which
+# must not reach a production image. A locked field ("!" / "*") is not the fix
+# either: sshd refuses public-key logins for a locked account, so the headless
+# profile would lose its only entry path. Instead give root an unguessable
+# random hash and discard the plaintext - password authentication stays off in
+# sshd_config, and key login keeps working.
+_pw=$(head -c 24 /dev/urandom | base64 2>/dev/null || echo "$$-$(date +%s%N)")
+_hash=$(mkpasswd -m sha512 "$_pw" 2>/dev/null || true)
+[ -n "$_hash" ] || die "mkpasswd could not hash the root password"
+awk -v h="$_hash" 'BEGIN{FS=OFS=":"} $1=="root"{$2=h} {print}' /etc/shadow >/etc/shadow.new &&
+	mv /etc/shadow.new /etc/shadow && chmod 600 /etc/shadow ||
+	die "could not set the root password hash"
+unset _pw _hash
 
 # The VPS has no IPv6 route; disabling IPv6 avoids resolver timeouts.
 cat >/etc/sysctl.conf <<'EOF'
