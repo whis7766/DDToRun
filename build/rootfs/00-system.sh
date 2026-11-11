@@ -24,20 +24,9 @@ for _service in crond:default syslog:boot swap:boot hwclock:boot cgroups:sysinit
 	rc-update del "$_name" "$_level" >/dev/null 2>&1 || true
 done
 
-# Serial console on ttyS0 (115200 8N1). The platform bridges the VM serial0
-# socket to a tenant-owned unix socket, so this is the interactive debug path
-# in both profiles and is independent of the VGA/kiosk path.
-sed -i '/^#\?ttyS0::respawn:/d' /etc/inittab
-printf '%s\n' 'ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100' >>/etc/inittab
-
-# The official tool's --serial-console writes console=ttyS0, which makes the
-# kernel move its console entirely to the serial port: after switch_root the VGA
-# screen stays black, so a captured frame can no longer tell "still booting"
-# from "hung". Keep tty0 first so kernel messages appear on both, and pin the
-# serial baud rate. /dev/console resolves to the last console=, i.e. ttyS0.
-sed -i 's|^\(default_kernel_opts=\).*|\1"console=tty0 console=ttyS0,115200"|' \
-	/etc/update-extlinux.conf
-update-extlinux --warn-only >/dev/null 2>&1 || true
+# Serial console is deliberately absent: production images are reached over
+# VGA kiosk or SSH, not ttyS0. No ttyS0 getty is added and the kernel keeps its
+# default console (tty0).
 
 if [ "$PROFILE" = "headless" ]; then
 	# Headless: no VGA login at all, access is over SSH.

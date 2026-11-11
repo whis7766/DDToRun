@@ -73,7 +73,7 @@ HEADLESS_SSH=true  bash build/build.sh   # vpsssh
 
 脚本会走租户的 `content=import` 通道上传镜像、用 `import-from` 建机、经 SSH direct-tcpip 隧道抓帧，最后清理。加 `--keep` 可保留虚拟机手工排查。租户 API 没有 `importdisk`/`import-volume`/`screendump`，这是当前权限下可用的唯一通路。
 
-除抓帧外，脚本还会走平台桥接的串口：虚机 `serial0=socket` 被映射到宿主 `~/serial-<vmid>.sock`（666），`socat` 接上后以空密码登录 root、跑 `uname -a` 作为交互断言；`--skip-serial` 可跳过。虚机 CPU 固定 `host`：app-runner 按 `GOAMD64=v3` 编译，默认 `kvm64` 基线缺 v3 指令集会拒绝运行。
+串口只用于开发调试，**生产镜像不带 ttyS0 getty 和串口 console**。需要时加 `--serial`：建机带 `serial0=socket`，平台桥接到宿主 `~/serial-<vmid>.sock`（666），`socat` 接上后以空密码登录 root、跑 `uname -a` 作为交互断言。虚机 CPU 固定 `host`：app-runner 按 `GOAMD64=v3` 编译，默认 `kvm64` 基线缺 v3 指令集会拒绝运行。
 
 也可以在 Actions 里手动触发 **PVE Real-Machine Boot Test**，选 `asset` / `vga` / `disk_bus` / `memory_mb` 组合，抓到的帧作为 artifact 上传。
 
