@@ -59,5 +59,5 @@ FONT=$(find /usr/share/fonts -type f -iname 'wqy*' 2>/dev/null | head -1)
 printf '\033c' 2>/dev/null || true
 printf '\033[2J\033[H' 2>/dev/null || true
 
-APP_RUNNER_LOG_STDOUT_ONLY=1 exec "$FBTERM" -f "$FONT" -s 22 -- \
+exec "$FBTERM" -f "$FONT" -s 22 -- \
 	sh -c 'exec /usr/local/sbin/app-runner 2>&1 | tee -a /var/log/app-runner.log'

@@ -27,7 +27,6 @@ import (
 )
 
 const (
-	logPath      = "/var/log/app-runner.log"
 	maxRetry     = 6
 	maxRedirects = 10
 	retryDelay   = 3 * time.Second
@@ -56,15 +55,12 @@ func statusf(format string, args ...any) {
 	fmt.Printf("[app-runner] "+format+"\n", args...)
 }
 
+// openLog returns stdout. Persistence is owned by the service layer: the kiosk
+// launcher tees stdout to the log, the headless supervise-daemon redirects it
+// to output_log. The runner must not open its own log file, or every line would
+// be written twice in the headless profile.
 func openLog() io.Writer {
-	if os.Getenv("APP_RUNNER_LOG_STDOUT_ONLY") == "1" {
-		return os.Stdout
-	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return os.Stdout
-	}
-	return io.MultiWriter(os.Stdout, f)
+	return os.Stdout
 }
 
 // --- HTTP/1.1 client -------------------------------------------------------
@@ -424,6 +420,14 @@ func (p *progress) run(stop <-chan struct{}) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	// On a real terminal the carriage return overwrites one line; redirected
+	// to a log file or pipe, \r never starts a new line, so fall back to \n to
+	// keep the log readable instead of one giant line.
+	nl := "\r"
+	if !stdoutIsTerminal() {
+		nl = "\n"
+	}
+
 	lastBytes := int64(0)
 	lastTime := time.Now()
 	for {
@@ -439,10 +443,10 @@ func (p *progress) run(stop <-chan struct{}) {
 			lastBytes = cur
 
 			if p.total > 0 {
-				fmt.Printf("\r[app-runner] download %3d%% %5.1f/%5.1fMB %4.1fMB/s ",
+				fmt.Printf(nl+"[app-runner] download %3d%% %5.1f/%5.1fMB %4.1fMB/s ",
 					cur*100/p.total, megabytes(cur), megabytes(p.total), speed)
 			} else {
-				fmt.Printf("\r[app-runner] download %5.1fMB %4.1fMB/s ",
+				fmt.Printf(nl+"[app-runner] download %5.1fMB %4.1fMB/s ",
 					megabytes(cur), speed)
 			}
 		case <-stop:
