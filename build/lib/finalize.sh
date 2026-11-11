@@ -57,20 +57,28 @@ install_mbr() {
 #
 # alpine-make-vm-image already disables the 64bit feature (syslinux needs that)
 # and uses nodiscard. This appliance runs on always-on VPS hosts, so keep the
-# mature ext4 driver but drop the journal (16MiB), the reserved blocks and the
-# periodic fsck counters, compact the directory indexes and zero free blocks so
-# zstd compresses better.
+# mature ext4 driver, drop the reserved blocks and the periodic fsck counters,
+# compact the directory indexes and zero free blocks so zstd compresses better.
+#
+# The journal stays in. Dropping it saved 16MiB but made every reset or power
+# loss a corruption event: without a journal the runtime writes (app download,
+# logs, wtmp) leave half-committed metadata, and the next boot's preen fsck
+# cannot decide on it - verified by resetting the VM mid download, which left
+# /var/log/wtmp pointing at an invalid inode and stopped the machine before
+# networking came up, with the app never starting. A smaller 4MiB journal
+# carries this write volume comfortably and compresses away with the free
+# blocks, so crash safety costs almost nothing in the artifact.
 tune_ext4() {
 	tune2fs -m 0 -c 0 -i 0 "$1" >/dev/null 2>&1 || true
 
-	# Two passes on purpose: the first compacts the directory indexes (-D), the
-	# journal can only be removed from a clean filesystem, and dropping it leaves
-	# a journal inode behind that the second pass reclaims.
+	# Compact directory indexes first, then put the journal back if the base
+	# image dropped it (alpine-make-vm-image's default rootfs is journal-less).
 	_rc=0
 	e2fsck -fyD "$1" >/dev/null 2>&1 || _rc=$?
 	[ "$_rc" -le 1 ] || die "e2fsck failed with code $_rc"
 
-	tune2fs -O ^has_journal "$1" >/dev/null || die "failed to disable ext4 journal"
+	tune2fs -l "$1" | grep -q 'has_journal' ||
+		tune2fs -j -J size=4 "$1" >/dev/null || die "failed to enable ext4 journal"
 
 	_rc=0
 	e2fsck -fyD "$1" >/dev/null 2>&1 || _rc=$?
