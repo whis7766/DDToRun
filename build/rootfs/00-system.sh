@@ -7,6 +7,12 @@ setup-hostname vps-app
 # the base rootfs, and the kiosk stage runs before the app stage.
 install -d -m 0755 /opt /usr/local/sbin /var/log
 
+# Lock the root account. Production entry is the public-key login (headless) or
+# the kiosk launcher (kiosk); the base rootfs ships an empty password field,
+# which must never reach a production image. Locking the password does not
+# disable public-key authentication.
+passwd -l root 2>/dev/null || sed -i 's/^root:[^:]*:/root:!:/' /etc/shadow
+
 # The VPS has no IPv6 route; disabling IPv6 avoids resolver timeouts.
 cat >/etc/sysctl.conf <<'EOF'
 net.ipv6.conf.all.disable_ipv6 = 1
