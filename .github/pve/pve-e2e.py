@@ -212,6 +212,110 @@ def ssh_vnc_tunnel(vnc_port: int, local_port: int = 5910):
         transport.close()
 
 
+def headless_check(pve: PVE, vmid: str, timeout: float = 180.0) -> None:
+    """Log in with the baked user key and assert the headless boot contract.
+
+    Screen capture alone cannot tell a broken SSH image from a working one, so
+    this asserts the three things that actually matter and have regressed
+    before:
+
+      * public-key login still works (a locked root shadow field silently
+        rejects every key login, and password auth is off, so there is no
+        fallback path into the machine);
+      * sshd and app-runner reached ``started`` in the default runlevel;
+      * app-runner logs each line once (the runner writing its own log file on
+        top of the service redirect used to duplicate every line).
+
+    The guest takes a DHCP lease, so the address is resolved from the MAC in
+    ``ip neigh`` on the node after a ping sweep; hostnames are not unique.
+    """
+    mac = pve.call("GET", f"/nodes/{NODE}/qemu/{vmid}/config")["net0"].split("=")[1].split(",")[0]
+    ip = guest_ip_by_mac(mac, timeout)
+    print(f"headless: guest {mac} -> {ip}")
+
+    key = HERE.parents[1] / "build" / "vendor" / "ssh_user_key"
+    if not key.exists():
+        sys.exit(f"missing user key {key}")
+
+    transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
+    transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
+    deadline = time.monotonic() + timeout
+    last: Exception | None = None
+    client: paramiko.SSHClient | None = None
+    while time.monotonic() < deadline:
+        try:
+            channel = transport.open_channel(
+                "direct-tcpip", (ip, 22), ("127.0.0.1", 0), timeout=10
+            )
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(ip, 22, username="root",
+                           pkey=paramiko.Ed25519Key.from_private_key_file(str(key)),
+                           sock=channel, timeout=20, allow_agent=False, look_for_keys=False)
+            break
+        except Exception as exc:  # noqa: BLE001 - the last error is reported
+            last = exc
+            time.sleep(5)
+    if client is None:
+        sys.exit(f"headless: key login failed for {ip}: {last}")
+    print("headless: public-key login OK")
+
+    def run(cmd: str) -> str:
+        _in, out, _err = client.exec_command(cmd)
+        return out.read().decode(errors="replace")
+
+    status = run("rc-status default 2>/dev/null")
+    for service in ("sshd", "app-runner"):
+        if not any(service in line and "started" in line for line in status.splitlines()):
+            sys.exit(f"headless: {service} not started:\n{status}")
+
+    count = run("grep -c 'app-runner starting' /var/log/app-runner.log").strip()
+    if count != "1":
+        sys.exit(f"headless: app-runner logged its start {count} times, expected 1")
+
+    shadow = run("awk -F: '$1==\"root\"{print $2}' /etc/shadow").strip()
+    if not shadow or shadow[0] in "!*":
+        sys.exit("headless: root has an empty or locked password field")
+
+    print("headless: sshd + app-runner started, single log line, root password set")
+    client.close()
+    transport.close()
+
+
+def guest_ip_by_mac(mac: str, timeout: float = 180.0) -> str:
+    """Resolve a guest's DHCP address from the node's neighbour table.
+
+    The guest picks up a lease a few seconds into boot and the table only
+    learns about it once something talks to the address, so sweep the segment
+    between reads instead of assuming a fixed address.
+    """
+    transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
+    transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
+
+    def shell(cmd: str) -> str:
+        chan = transport.open_session()
+        chan.exec_command(cmd)
+        out = chan.makefile("r", 65536).read()
+        chan.recv_exit_status()
+        chan.close()
+        return out
+
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            for line in shell("ip neigh show dev vmbr0").splitlines():
+                parts = line.split()
+                if len(parts) < 3 or parts[0].count(".") != 3:
+                    continue
+                if parts[2].lower() == mac.lower():
+                    return parts[0]
+            shell("seq 2 254 | xargs -P 64 -I{} sh -c 'ping -c1 -W1 10.0.0.{} >/dev/null 2>&1'")
+            time.sleep(5)
+    finally:
+        transport.close()
+    sys.exit(f"headless: no neighbour entry for {mac}")
+
+
 def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path, attempts: int = 2) -> int:
     """Capture a frame. The vncproxy ticket/port can be momentarily not ready
     right after boot, so retry once with a fresh proxy ticket."""
@@ -355,6 +459,8 @@ def main() -> None:
     parser.add_argument("--boot-wait", type=float, default=20.0, help="seconds to wait before capturing")
     parser.add_argument("--serial", action="store_true",
                         help="drive the serial console (debug builds only; production images ship no ttyS0 getty)")
+    parser.add_argument("--ssh", action="store_true",
+                        help="assert the headless contract: key login, sshd + app-runner started, single log line")
     parser.add_argument("--keep", action="store_true", help="keep the VM running for manual inspection")
     args = parser.parse_args()
 
@@ -389,6 +495,8 @@ def main() -> None:
 
         if args.serial:
             serial_check(vmid)
+        if args.ssh:
+            headless_check(pve, vmid)
     finally:
         if args.keep:
             print(f"keeping VM {vmid}")
