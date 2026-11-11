@@ -197,8 +197,9 @@ def ssh_vnc_tunnel(vnc_port: int, local_port: int = 5910):
         while not stop.is_set():
             try:
                 client, _ = server.accept()
-            except socket.timeout:
-                continue
+            except (socket.timeout, OSError):
+                # OSError (EBADF) arrives once the listener is closed in cleanup.
+                return
             threading.Thread(target=pump, args=(client,), daemon=True).start()
 
     threading.Thread(target=accept_loop, daemon=True).start()
@@ -237,9 +238,11 @@ def serial_check(vmid: str, timeout: float = 60.0) -> None:
     chan.settimeout(5)
     chan.exec_command(f"socat - UNIX-CONNECT:$HOME/serial-{vmid}.sock 2>&1")
 
-    def read_until(marker: str, deadline: float) -> str:
-        buf = ""
-        while time.monotonic() < deadline:
+    buf = ""
+
+    def read_until(marker: str, deadline: float, optional: bool = False) -> str:
+        nonlocal buf
+        while marker not in buf and time.monotonic() < deadline:
             try:
                 data = chan.recv(4096).decode(errors="replace")
             except socket.timeout:
@@ -247,15 +250,26 @@ def serial_check(vmid: str, timeout: float = 60.0) -> None:
             if not data:
                 break
             buf += data
-            if marker in buf:
+        if marker not in buf:
+            if optional:
                 return buf
-        raise RuntimeError(f"serial: waited for {marker!r}, tail={buf[-200:]!r}")
+            raise RuntimeError(f"serial: waited for {marker!r}, tail={buf[-200:]!r}")
+        idx = buf.index(marker) + len(marker)
+        matched, buf = buf[:idx], buf[idx:]
+        return matched
 
     deadline = time.monotonic() + timeout
+
+    # The getty may not print its prompt until it sees an initial line
+    # discipline character; send a CR to wake it before waiting for login:.
+    chan.sendall("\r")
     read_until("login:", deadline)
     chan.sendall("root\n")
-    read_until("Password:", deadline)
-    chan.sendall("\n")
+    # Empty-password builds skip the Password: prompt entirely. Give it only a
+    # short window; do not consume the main deadline waiting for a prompt that
+    # will never arrive, and only send the empty password if it actually shows.
+    if "Password:" in read_until("Password:", time.monotonic() + 3.0, optional=True):
+        chan.sendall("\n")
     read_until("#", deadline)
 
     chan.sendall("uname -a\n")
