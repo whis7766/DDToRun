@@ -212,16 +212,25 @@ def ssh_vnc_tunnel(vnc_port: int, local_port: int = 5910):
         transport.close()
 
 
-def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path) -> int:
-    proxy = pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/vncproxy")
-    with ssh_vnc_tunnel(int(proxy["port"])) as local_port:
-        result = subprocess.run(
-            ["vncdo", "-s", f"127.0.0.1::{local_port}", "-p", proxy["ticket"],
-             "capture", str(out_png)],
-            capture_output=True,
-            timeout=90,
-        )
-    return result.returncode
+def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path, attempts: int = 2) -> int:
+    """Capture a frame. The vncproxy ticket/port can be momentarily not ready
+    right after boot, so retry once with a fresh proxy ticket."""
+    last: subprocess.CompletedProcess | None = None
+    for _ in range(attempts):
+        proxy = pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/vncproxy")
+        try:
+            with ssh_vnc_tunnel(int(proxy["port"])) as local_port:
+                last = subprocess.run(
+                    ["vncdo", "-s", f"127.0.0.1::{local_port}", "-p", proxy["ticket"],
+                     "capture", str(out_png)],
+                    capture_output=True,
+                    timeout=90,
+                )
+            if last.returncode == 0:
+                return 0
+        except subprocess.TimeoutExpired:
+            last = None
+    return last.returncode if last is not None else 1
 
 
 def serial_check(vmid: str, timeout: float = 60.0) -> None:
@@ -229,8 +238,8 @@ def serial_check(vmid: str, timeout: float = 60.0) -> None:
 
     The platform maps the guest serial0 socket to ``~/serial-<vmid>.sock``
     (mode 666); ``socat`` bridges it to ``/var/run/qemu-server/<vmid>.serial0``.
-    The guest runs a getty on ttyS0, so this is an interactive second channel
-    alongside the VNC capture. The appliance ships an empty root password.
+    This only works on debug builds that still run a getty on ttyS0; production
+    images ship no serial surface, so the check is opt-in via ``--serial``.
     """
     transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
     transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
