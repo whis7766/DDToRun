@@ -318,9 +318,15 @@ def headless_check(pve: PVE, vmid: str, timeout: float = 180.0) -> None:
         if not any(service in line and "started" in line for line in status.splitlines()):
             sys.exit(f"headless: {service} not started:\n{status}")
 
-    count = run("grep -c 'app-runner starting' /var/log/app-runner.log").strip()
-    if count != "1":
-        sys.exit(f"headless: app-runner logged its start {count} times, expected 1")
+    # Double-write means the same line landed twice, i.e. two identical lines
+    # with the same timestamp. Counting start lines alone breaks after a reset
+    # storm, where each boot legitimately appends one more line.
+    dups = run(
+        "grep 'app-runner starting' /var/log/app-runner.log "
+        "| sort | uniq -d | wc -l"
+    ).strip()
+    if dups != "0":
+        sys.exit(f"headless: app-runner logged {dups} duplicated start line(s)")
 
     shadow = run("awk -F: '$1==\"root\"{print $2}' /etc/shadow").strip()
     if not shadow or shadow[0] in "!*":
