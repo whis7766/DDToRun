@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       app_url:
-        description: "Business binary URL (blank keeps the default compiled into app-runner)"
+        description: "Business binary URL injected into app-runner (blank ships an image with no download address)"
         required: false
         type: string
       release_tag:
@@ -65,8 +65,8 @@ jobs:
           APP_URL: "${{ inputs.app_url }}"
         run: |
           cd build/vendor
-          # The default URL lives in app-runner.go only; an explicit app_url
-          # input overrides it through -X.
+          # app-runner ships no download address; an explicit app_url input
+          # injects one through -X.
           LDFLAGS="-s -w"
           if [ -n "$APP_URL" ]; then
             LDFLAGS="$LDFLAGS -X main.appURL=$APP_URL"

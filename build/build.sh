@@ -18,7 +18,7 @@
 # and is intentionally not baked into production images.
 #
 # Environment (all optional):
-#   APP_URL        business binary URL compiled into app-runner
+#   APP_URL        business binary URL injected into app-runner (empty = none)
 #   IMAGE_SIZE_GB  image size in GB (default 1)
 #   ALPINE_MIRROR  apk mirror (default https://dl-cdn.alpinelinux.org/alpine)
 #   ALPINE_BRANCH  Alpine branch (default v3.22)
