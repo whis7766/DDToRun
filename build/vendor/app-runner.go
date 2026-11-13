@@ -41,7 +41,13 @@ const (
 var (
 	appPath = "/opt/business-app"
 	tmpPath = "/opt/business-app.tmp"
-	appURL  = "https://furryfree.pages.dev/release?token=jaJ81HfL&filename=subs-check_linux_amd64v3&tag=ctyun"
+
+	// appURL is empty on purpose: the image ships no business download address
+	// (and therefore no token). It is injected at build time with
+	// -X main.appURL=... when a build should fetch a binary; without it the
+	// runner logs "no download URL baked in" and serves whatever is already
+	// installed.
+	appURL = ""
 
 	// progressInline redraws one line with a carriage return, which is what the
 	// kiosk wants on the framebuffer. It is selected by an explicit flag rather
