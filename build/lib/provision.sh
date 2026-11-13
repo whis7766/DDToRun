@@ -27,7 +27,8 @@ provision_apk() {
 	fi
 
 	_listing=$(curl -fsSL --retry 5 --retry-all-errors --connect-timeout 20 \
-		"$4/$3/main/x86_64/" 2>/dev/null) || die "cannot list apk-tools packages"
+		"$4/$3/main/x86_64/" 2>/dev/null) ||
+		die "cannot list $4/$3/main/x86_64 - '$3' must be an apk branch (v3.22), not a point release (v3.22.1)"
 	_pkg=$(printf '%s\n' "$_listing" \
 		| grep -oE 'apk-tools-static-[0-9]+(\.[0-9]+)*(-r[0-9]+)?\.apk' \
 		| sort -V | tail -1)

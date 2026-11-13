@@ -35,7 +35,7 @@ import requests
 import zstandard
 
 NODE = "pve"
-STORAGE = "tenant-private"
+STORAGE = "ddtester-private"
 POOL = "tenant-pool"
 HERE = pathlib.Path(__file__).resolve().parent
 OUT = HERE / "out"
