@@ -1,54 +1,68 @@
 #!/sbin/openrc-run
+# shellcheck shell=sh
 # shellcheck disable=SC2034  # settings consumed by openrc-run, not by this file
-description="Grow root filesystem to fill the whole disk"
+description="Grow the root partition and filesystem to fill the whole disk"
 
 depend() {
 	need localmount
 }
 
+# The image ships a plain MBR layout: one ext4 partition that has to fill the
+# disk it is imported onto. A device without a partition suffix (LVM, mapper,
+# a whole-disk filesystem) cannot be grown this way and is left alone.
+#
+# Growth is decided from the partition and filesystem state, not from a marker
+# file: growpart reports NOCHANGE when the partition already reaches the end of
+# the disk, and resize2fs is a no-op when the filesystem already fills its
+# partition. So the first boot grows the disk once and every later boot does
+# nothing - and nothing is written to disk to remember that, so there is no
+# stamp file, no leftover state and nothing to clean up. Growpart's own scratch
+# files go under /run (a tmpfs), so they disappear on the next boot too.
 start() {
 	ebegin "Growing root filesystem to fill disk"
 
-	ROOT_UUID=$(sed -n 's/.*root=UUID=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
-	ROOT_DEV=""
-	[ -n "$ROOT_UUID" ] && ROOT_DEV=$(findfs "UUID=$ROOT_UUID" 2>/dev/null || true)
-	[ -z "$ROOT_DEV" ] && ROOT_DEV=$(findmnt -no SOURCE / 2>/dev/null || true)
-	[ -n "$ROOT_DEV" ] || {
+	ROOT_DEV=$(findmnt -no SOURCE / 2>/dev/null || true)
+	case "$ROOT_DEV" in
+	"" | /dev/mapper/* | /dev/dm-* | /dev/loop*)
 		eend 0
 		return 0
-	}
+		;;
+	esac
 
-	DISK=$(echo "$ROOT_DEV" | sed 's/p\?[0-9]*$//')
-	PART_NUM=$(echo "$ROOT_DEV" | grep -oE '[0-9]+$')
+	PART_NUM=${ROOT_DEV##*[!0-9]}
 	[ -n "$PART_NUM" ] || {
 		eend 0
 		return 0
 	}
 
-	# Idempotent skip: the disk size is stamped only after a completed grow,
-	# so an unchanged disk returns instantly while a resized disk re-grows.
-	STAMP=/var/lib/grow-root.done
-	DISK_SECTORS=$(cat "/sys/class/block/$(basename "$DISK")/size" 2>/dev/null || true)
-	if [ -n "$DISK_SECTORS" ] && [ -f "$STAMP" ] &&
-		[ "$(cat "$STAMP" 2>/dev/null)" = "$DISK_SECTORS" ]; then
+	DISK=${ROOT_DEV%"$PART_NUM"}
+	# nvme0n1/mmcblk0 name their partitions with a "p" separator (nvme0n1p1).
+	case "$ROOT_DEV" in
+	*nvme* | *mmcblk* | *loop*) DISK=${DISK%p} ;;
+	esac
+	[ -b "$DISK" ] || {
 		eend 0
 		return 0
+	}
+
+	# Keep growpart's temporary files off the root filesystem.
+	TMPDIR=${TMPDIR:-/run}
+	export TMPDIR
+
+	if ! growpart_out=$(growpart "$DISK" "$PART_NUM" 2>&1); then
+		# NOCHANGE only means "already fills the disk", which is success.
+		case "$growpart_out" in
+		*NOCHANGE*) ;;
+		*)
+			eerror "growpart failed: $growpart_out"
+			eend 1
+			return 1
+			;;
+		esac
 	fi
 
-	# growpart only extends when needed and exits non-zero with NOCHANGE when
-	# the partition already reaches the end of the disk; treat that as success
-	# so equal-size images converge and still get the stamp.
-	growpart_out=$(growpart "$DISK" "$PART_NUM" 2>&1)
-	growpart_rc=$?
-	if [ "$growpart_rc" -ne 0 ] &&
-		! printf '%s\n' "$growpart_out" | grep -qi 'NOCHANGE'; then
-		eend 1
-		return 1
-	fi
-
-	if resize2fs "$ROOT_DEV" >/dev/null 2>&1; then
-		[ -n "$DISK_SECTORS" ] && echo "$DISK_SECTORS" >"$STAMP"
-	else
+	if ! resize_out=$(resize2fs "$ROOT_DEV" 2>&1); then
+		eerror "resize2fs failed: $resize_out"
 		eend 1
 		return 1
 	fi
