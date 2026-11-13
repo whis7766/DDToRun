@@ -49,7 +49,7 @@ case "$ALPINE_BRANCH" in
 v[0-9]*.[0-9]*.[0-9]*) ALPINE_BRANCH=${ALPINE_BRANCH%.*} ;;
 esac
 case "$ALPINE_BRANCH" in
-v[0-9]*.[0-9]) ;;
+v[0-9].*) ;;
 *) die "ALPINE_BRANCH must look like v3.22 (got '$ALPINE_BRANCH')" ;;
 esac
 KERNEL_FLAVOR=${KERNEL_FLAVOR:-virt}
