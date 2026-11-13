@@ -159,3 +159,11 @@ if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
 fi
 
 apk cache clean >/dev/null 2>&1 || true
+
+# The chroot leaves transient files in /tmp: the fbterm build tree and its log
+# in the kiosk profile, plus the .ICE-unix / .X11-unix socket directories that
+# fontconfig and the X11 libraries create while running here. None of it
+# belongs in a shipped image - and a stale entry like /tmp/.ICE-unix is exactly
+# what a boot-time fsck trips over after an unclean shutdown.
+rm -rf /tmp/* /tmp/.[!.]* /tmp/..?* 2>/dev/null || true
+
