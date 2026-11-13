@@ -40,6 +40,18 @@ APP_URL=${APP_URL:-}
 IMAGE_SIZE_GB=${IMAGE_SIZE_GB:-1}
 ALPINE_MIRROR=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
 ALPINE_BRANCH=${ALPINE_BRANCH:-v3.22}
+
+# apk repositories are keyed by release branch (v3.22, v3.24), not by point
+# release (v3.24.4). Passing a point release used to fail deep inside the build
+# with "cannot list apk-tools packages"; normalise it here and fail early with
+# a message that says what to use instead.
+case "$ALPINE_BRANCH" in
+v[0-9]*.[0-9]*.[0-9]*) ALPINE_BRANCH=${ALPINE_BRANCH%.*} ;;
+esac
+case "$ALPINE_BRANCH" in
+v[0-9]*.[0-9]) ;;
+*) die "ALPINE_BRANCH must look like v3.22 (got '$ALPINE_BRANCH')" ;;
+esac
 KERNEL_FLAVOR=${KERNEL_FLAVOR:-virt}
 HEADLESS_SSH=${HEADLESS_SSH:-false}
 EXTRA_PACKAGES=${PACKAGES:-}
