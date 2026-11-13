@@ -21,7 +21,23 @@ depend() {
 start() {
 	ebegin "Growing root filesystem to fill disk"
 
-	ROOT_DEV=$(findmnt -no SOURCE / 2>/dev/null || true)
+	# Resolve the real root device. findmnt alone is not enough: during boot
+	# the initramfs leaves /dev/root as a symlink (and it may already be gone
+	# when this runs), and neither form yields a partition number - the service
+	# then silently skipped the grow, which is exactly what happened booting a
+	# 1GiB image on a 2GiB disk. The kernel cmdline carries the authoritative
+	# root=UUID, so resolve that first.
+	ROOT_DEV=""
+	ROOT_SPEC=$(sed -n 's/^.*\broot=\([^ ]*\).*$/\1/p' /proc/cmdline 2>/dev/null)
+	case "$ROOT_SPEC" in
+	UUID=*) ROOT_DEV=$(findfs "$ROOT_SPEC" 2>/dev/null || true) ;;
+	/dev/*) ROOT_DEV=$ROOT_SPEC ;;
+	esac
+	if [ -z "$ROOT_DEV" ] || [ ! -b "$ROOT_DEV" ]; then
+		ROOT_DEV=$(findmnt -no SOURCE / 2>/dev/null || true)
+		[ -n "$ROOT_DEV" ] && [ ! -b "$ROOT_DEV" ] &&
+			ROOT_DEV=$(readlink -f "$ROOT_DEV" 2>/dev/null || true)
+	fi
 	case "$ROOT_DEV" in
 	"" | /dev/mapper/* | /dev/dm-* | /dev/loop*)
 		eend 0
