@@ -292,6 +292,29 @@ def build_fetch_template(dest: pathlib.Path, asset: dict) -> None:
         tout.addfile(info, io.BytesIO(body))
 
 
+def destroy(pve: PVE, kind: str, vmid) -> bool:
+    """Stop and destroy a VM or CT, retrying the destroy.
+
+    PVE refuses to destroy a guest that is still shutting down ("container is
+    locked" / "unable to destroy"), and the first attempt right after the stop
+    call always lands in that window. Swallowing it leaks a running container
+    per test run, so retry and stay loud when it really fails.
+    """
+    with contextlib.suppress(Exception):
+        pve.wait_task(pve.call("POST", f"/nodes/{NODE}/{kind}/{vmid}/status/stop"),
+                      timeout=120)
+    last: Exception | None = None
+    for _ in range(6):
+        try:
+            pve.wait_task(pve.call("DELETE", f"/nodes/{NODE}/{kind}/{vmid}"), timeout=120)
+            return True
+        except Exception as exc:  # noqa: BLE001 - retried, then reported
+            last = exc
+            time.sleep(3)
+    print(f"WARNING: could not destroy {kind} {vmid}: {last}")
+    return False
+
+
 def fetch_into_storage(pve: PVE, asset: dict) -> None:
     """Run the worker CT until the qcow2 lands in import storage."""
     template = f"fetch-worker-{asset['name']}.tar.gz"
@@ -315,8 +338,7 @@ def fetch_into_storage(pve: PVE, asset: dict) -> None:
     while time.monotonic() < deadline:
         if import_volume_exists(pve, asset["name"]):
             print("image present in import storage")
-            with contextlib.suppress(Exception):
-                pve.wait_task(pve.call("DELETE", f"/nodes/{NODE}/lxc/{vmid}"), timeout=120)
+            destroy(pve, "lxc", vmid)
             with contextlib.suppress(Exception):
                 pve.call("DELETE", f"/nodes/{NODE}/storage/{STORAGE}/content/"
                          f"vztmpl/{template}")
@@ -352,10 +374,7 @@ def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str
 
 
 def teardown(pve: PVE, vmid: str) -> None:
-    with contextlib.suppress(Exception):
-        pve.wait_task(pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/stop"), timeout=120)
-    with contextlib.suppress(Exception):
-        pve.wait_task(pve.call("DELETE", f"/nodes/{NODE}/qemu/{vmid}"), timeout=120)
+    destroy(pve, "qemu", vmid)
 
 
 # --- screen capture --------------------------------------------------------
