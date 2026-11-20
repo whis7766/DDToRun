@@ -67,17 +67,19 @@ release 里除 zstd 压缩的 raw 外还带一份 `<flavor>.qcow2`：PVE 的 `im
 
 ## 测试
 
-**测试只在 PVE 上做，Actions 不跑虚拟机。** 在 PVE 主机上直接用已有镜像：
+**测试只在 PVE 上做，Actions 不跑虚拟机。** 整条链路只走租户 API，不碰宿主机 shell：
 
 ```sh
-.github/pve/pve-e2e.py --raw ~/images/import/vpsvga.raw --vga qxl --disk-bus scsi
+.github/pve/pve-e2e.py --asset vpsvga --vga qxl --disk-bus scsi
 ```
 
-脚本会走租户的 `content=import` 通道上传镜像、用 `import-from` 建机、经 SSH direct-tcpip 隧道抓帧，最后清理。加 `--keep` 可保留虚拟机手工排查。租户 API 没有 `importdisk`/`import-volume`/`screendump`，这是当前权限下可用的唯一通路。
+凭据全从环境变量来（`PVE_HOST`、`PVE_API_PORT`、`PVE_USER`、`PVE_API_PASS`、`PVE_TLS_FP`，可选 `PVE_STORAGE` / `PVE_POOL` / `PVE_FETCH_IP`，缺省时从 API 自动发现）。
 
-串口只用于开发调试，**生产镜像不带 ttyS0 getty 和串口 console**。需要时加 `--serial`：建机带 `serial0=socket`，平台桥接到宿主 `~/serial-<vmid>.sock`（666），`socat` 接上后以空密码登录 root、跑 `uname -a` 作为交互断言。虚机 CPU 固定 `host`：app-runner 按 `GOAMD64=v3` 编译，默认 `kvm64` 基线缺 v3 指令集会拒绝运行。
+镜像不走租户隧道，那是计费的 NAT 通路。脚本先确认 `import` 存储里有 `<asset>.qcow2`，没有就临时起一个 LXC 抓取容器：节点用自己的出口从 GitHub 拉这个 qcow2（release 里带一份，`import-from` 只认 raw/qcow2/vmdk，不必在节点上解压），再经节点本地 API 落进存储。容器不打印任何东西——开机时控制台没有读者，写阻塞会卡死 init——进度写成阶梯文件（第 N 步 8N MiB，失败 +4 MiB），靠存储卷的 `used` 反读，失败即销毁。镜像到位后用 `import-from` 建机，抓帧走 `vncproxy` + 网关 WebSocket（ticket 同时是 VNC 密码），桥到本地端口交给 vncdotool。
 
-也可以在 Actions 里手动触发 **PVE Real-Machine Boot Test**，选 `asset` / `vga` / `disk_bus` / `memory_mb` 组合，抓到的帧作为 artifact 上传。
+租户角色里没有 `VM.Config.Options`，因此建机不带 `name` / `bios` / `onboot` / `agent`：这些选项会被直接拒绝，其余（`cores`、`memory`、`cpu=host`、`vga`、`machine`、`scsi0`、`net0`、`boot`）都可用。没有 `agent=1` 也意味着 rc-status / 日志去重 / 密钥登录这些机内断言无从谈起——**抓到的帧就是断言**：`vpsvga` 该出现 fbterm 中文界面，`vpsssh` 该停在无登录的启动信息。虚机 CPU 固定 `host`：app-runner 按 `GOAMD64=v3` 编译，默认 `kvm64` 基线缺 v3 指令集会拒绝运行。
+
+也可以手动触发 **PVE Real-Machine Boot Test**，选 `asset` / `vga` / `disk_bus` / `memory_mb` 组合，抓到的帧作为 artifact 上传。
 
 ## 两个刻意的设计
 

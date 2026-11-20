@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
-"""PVE real-machine boot test for a release image.
+"""PVE real-machine boot test for a release image, over the tenant API only.
 
-Flow: obtain a raw image (download a release asset, or use a local file) ->
-upload it through the tenant ``content=import`` channel -> create a VM with
-``import-from`` (chosen display adapter and disk bus) -> boot it -> capture the
-screen over an SSH VNC tunnel -> tear the VM down.
+Flow: make sure an importable qcow2 sits in the tenant's ``import`` storage
+(pulled by a throwaway LXC worker on the node's own network, or already there)
+-> create a VM with ``import-from`` -> boot it -> grab a frame through
+``vncproxy`` and the API gateway's WebSocket -> tear everything down.
 
-The tenant API does not expose importdisk / import-volume / screendump, so the
-import channel plus a direct-tcpip VNC tunnel are the only paths available.
-Credentials come from the environment; nothing is hard-coded.
+There is no SSH anywhere in this path. The tenant role grants the VM and
+datastore permissions but no host shell, so every step goes through the API:
 
-Typical use on the PVE host itself, with an image already on disk:
+* image transfer uses a fetcher container: the node downloads the release asset
+  with its own egress and hands it to the node-local API. Image bytes must never
+  travel over the tenant tunnel - it is a metered NAT path.
+* the screen comes back over ``vncwebsocket`` (the ticket is the VNC password),
+  bridged to a local TCP port for vncdotool.
+* ``VM.Config.Options`` is not in the tenant role, so the VM is created without
+  ``name`` / ``bios`` / ``onboot`` / ``agent``: those options are refused
+  outright. Everything else (cores, memory, cpu, vga, machine, scsi0, net0,
+  boot) is allowed and used.
 
-    ./pve-e2e.py --raw ~/images/import/vpsvga.raw --vga qxl --disk-bus scsi
+Guest-side assertions (rc-status, log dedupe, key login) need either SSH or the
+guest agent, and setting ``agent=1`` is itself a ``VM.Config.Options`` change,
+so they are out of reach here. The captured frame is the assertion: the kiosk
+profile must show the fbterm UI, the headless profile must show boot messages.
 """
 
 from __future__ import annotations
@@ -20,25 +30,35 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import io
 import os
 import pathlib
-import select
 import socket
 import ssl
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 
-import paramiko
 import requests
-import zstandard
+import urllib3
 
-NODE = "pve"
-STORAGE = "ddtester-private"
-POOL = "tenant-pool"
 HERE = pathlib.Path(__file__).resolve().parent
+REPO_DIR = HERE.parents[1]
 OUT = HERE / "out"
+
+NODE = os.environ.get("PVE_NODE", "")
+STORAGE = os.environ.get("PVE_STORAGE", "")
+POOL = os.environ.get("PVE_POOL", "")
+
+# The fetcher worker takes a static address: DHCP for containers on this bridge
+# never produced a lease, while a static address on the same subnet reaches the
+# node API. Keep it configurable so two workers never collide.
+FETCH_IP = os.environ.get("PVE_FETCH_IP", "10.0.0.250/24")
+FETCH_GW = os.environ.get("PVE_FETCH_GW", "10.0.0.101")
+
+API_TICKET = "/access/ticket"
 
 
 # --- environment -----------------------------------------------------------
@@ -51,12 +71,6 @@ def env(name: str) -> str:
 
 def normalize_fingerprint(value: str) -> str:
     return value.replace(":", "").replace(" ", "").lower()
-
-
-def ssh_username() -> str:
-    """SSH login name. The API user carries the realm suffix (``ddtester@pve``),
-    but the SSH account is the bare name; PVE_SSH_USER overrides if needed."""
-    return os.environ.get("PVE_SSH_USER") or env("PVE_USER").split("@")[0]
 
 
 def verify_server_fingerprint(host: str, port: int, expected: str) -> None:
@@ -74,42 +88,74 @@ def verify_server_fingerprint(host: str, port: int, expected: str) -> None:
 
 # --- PVE API ---------------------------------------------------------------
 class PVE:
-    """Minimal PVE API client bound to one tenant session."""
+    """Minimal PVE API client for one tenant session, with retry on the gateway.
+
+    The tenant API arrives through a tunnel that drops and reconnects; a single
+    refused connection must not kill a six-minute boot test.
+    """
 
     def __init__(self, base: str, user: str, password: str):
         self.base = base
+        self.user = user
+        self.password = password
+        # This dev box exports a CA bundle that would override verify=False.
         self.http = requests.Session()
+        self.http.trust_env = False
         self.http.verify = False
-        resp = self.http.post(
-            f"{base}/access/ticket", data={"username": user, "password": password},
-            verify=False,
-        )
-        resp.raise_for_status()
-        data = resp.json()["data"]
-        self.http.cookies.set("PVEAuthCookie", data["ticket"])
-        self.http.headers["CSRFPreventionToken"] = data["CSRFPreventionToken"]
+        self.cookie = ""
+        self.csrf = ""
+        self.login()
+
+    def login(self) -> None:
+        for attempt in range(6):
+            try:
+                resp = self.http.post(
+                    f"{self.base}{API_TICKET}",
+                    data={"username": self.user, "password": self.password}, timeout=20)
+                resp.raise_for_status()
+                data = resp.json()["data"]
+                self.cookie = data["ticket"]
+                self.csrf = data["CSRFPreventionToken"]
+                self.http.cookies.set("PVEAuthCookie", self.cookie)
+                self.http.headers["CSRFPreventionToken"] = self.csrf
+                return
+            except (requests.RequestException, ValueError):
+                if attempt == 5:
+                    raise
+                time.sleep(8)
 
     def call(self, method: str, path: str, **params):
         """One API request: parameters go in the query string on GET, in the
-        form body otherwise."""
+        form body otherwise. Gateway hiccups are retried."""
         kwargs = {"params": params or None} if method == "GET" else {"data": params or None}
-        resp = self.http.request(method, f"{self.base}{path}", verify=False, **kwargs)
-        if resp.status_code >= 400:
-            raise RuntimeError(f"{method} {path} -> {resp.status_code} {resp.text[:300]}")
-        return resp.json()["data"]
+        last = None
+        for attempt in range(5):
+            try:
+                resp = self.http.request(method, f"{self.base}{path}", timeout=60, **kwargs)
+            except requests.RequestException as exc:
+                last = exc
+                time.sleep(5)
+                continue
+            if resp.status_code == 401:
+                self.login()
+                continue
+            if resp.status_code >= 400:
+                raise RuntimeError(f"{method} {path} -> {resp.status_code} {resp.text[:300]}")
+            return resp.json()["data"]
+        raise RuntimeError(f"{method} {path} -> gateway unreachable: {last}")
 
     def upload(self, content: str, filepath: pathlib.Path):
         with filepath.open("rb") as handle:
             resp = self.http.post(
                 f"{self.base}/nodes/{NODE}/storage/{STORAGE}/upload",
                 files={"filename": (filepath.name, handle)},
-                data={"content": content}, verify=False,
+                data={"content": content}, timeout=3600,
             )
         if resp.status_code >= 400:
             raise RuntimeError(f"upload -> {resp.status_code} {resp.text[:300]}")
         return resp.json()["data"]
 
-    def wait_task(self, upid, timeout: float = 300.0) -> None:
+    def wait_task(self, upid, timeout: float = 900.0) -> None:
         if not (isinstance(upid, str) and upid.startswith("UPID")):
             return
         deadline = time.monotonic() + timeout
@@ -120,405 +166,279 @@ class PVE:
                 if exit_status and exit_status != "OK":
                     raise RuntimeError(f"task failed: {exit_status}")
                 return
-            time.sleep(1.5)
+            time.sleep(2)
         raise TimeoutError(f"task {upid} did not finish in {timeout}s")
 
 
+def discover(pve: PVE) -> None:
+    """Fill NODE / STORAGE / POOL from the API when the environment is silent."""
+    global NODE, STORAGE, POOL
+    if not NODE:
+        NODE = pve.call("GET", "/nodes")[0]["node"]
+    if POOL:
+        return
+    pools = [p["poolid"] for p in pve.call("GET", "/pools")]
+    if len(pools) == 1:
+        POOL = pools[0]
+    if not STORAGE:
+        members = pve.call("GET", f"/pools/{POOL}")["members"]
+        stores = [m["storage"] for m in members if m["type"] == "storage"]
+        STORAGE = stores[0]
+    print(f"tenant: node={NODE} storage={STORAGE} pool={POOL}")
+
+
 # --- image acquisition -----------------------------------------------------
-def download_asset(tag: str, asset: str, dest: pathlib.Path) -> pathlib.Path:
-    """Download a release asset and decompress it to dest (raw)."""
+def import_volume_exists(pve: PVE, name: str) -> bool:
+    for entry in pve.call("GET", f"/nodes/{NODE}/storage/{STORAGE}/content"):
+        if str(entry.get("volid", "")).endswith(f"import/{name}"):
+            return True
+    return False
+
+
+def github_asset(tag: str, name: str) -> dict:
     token = env("GITHUB_TOKEN")
     repo = env("GITHUB_REPOSITORY")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-
     release = requests.get(
-        f"https://api.github.com/repos/{repo}/releases/tags/{tag}", headers=headers
-    )
+        f"https://api.github.com/repos/{repo}/releases/tags/{tag}", headers=headers, timeout=60)
     release.raise_for_status()
-    obj = next((a for a in release.json()["assets"] if a["name"] == asset), None)
-    if obj is None:
-        sys.exit(f"asset {asset} not found in release {tag}")
-
-    compressed = dest.with_suffix(".zst")
-    with requests.get(
-        obj["url"], headers={**headers, "Accept": "application/octet-stream"}, stream=True
-    ) as resp:
-        resp.raise_for_status()
-        with compressed.open("wb") as handle:
-            for block in resp.iter_content(chunk_size=1 << 20):
-                handle.write(block)
-
-    with compressed.open("rb") as src, dest.open("wb") as dst:
-        zstandard.ZstdDecompressor().copy_stream(src, dst)
-    compressed.unlink()
-    return dest
+    for asset in release.json()["assets"]:
+        if asset["name"] == name:
+            return asset
+    sys.exit(f"asset {name} not found in release {tag}")
 
 
-# --- screen capture --------------------------------------------------------
-@contextlib.contextmanager
-def ssh_vnc_tunnel(vnc_port: int, local_port: int = 5910):
-    """Expose the node-local VNC port through a direct-tcpip SSH channel.
+FETCH_INITTAB = """::sysinit:/root/fetch.sh
+::ctrlaltdel:/sbin/reboot
+"""
 
-    paramiko's request_port_forward is denied on this host, but the lower-level
-    direct-tcpip channel works.
-    """
-    transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
-    transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
-
-    stop = threading.Event()
-    server = socket.socket()
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("127.0.0.1", local_port))
-    server.listen(5)
-    server.settimeout(1)
-
-    def pump(client: socket.socket) -> None:
-        channel = transport.open_channel(
-            "direct-tcpip", ("127.0.0.1", vnc_port), ("127.0.0.1", local_port)
-        )
-        try:
-            while True:
-                readable, _, _ = select.select([client, channel], [], [])
-                if client in readable:
-                    data = client.recv(4096)
-                    if not data:
-                        break
-                    channel.sendall(data)
-                if channel in readable:
-                    data = channel.recv(4096)
-                    if not data:
-                        break
-                    client.sendall(data)
-        finally:
-            channel.close()
-            client.close()
-
-    def accept_loop() -> None:
-        while not stop.is_set():
-            try:
-                client, _ = server.accept()
-            except (socket.timeout, OSError):
-                # OSError (EBADF) arrives once the listener is closed in cleanup.
-                return
-            threading.Thread(target=pump, args=(client,), daemon=True).start()
-
-    threading.Thread(target=accept_loop, daemon=True).start()
-    time.sleep(0.5)
-    try:
-        yield local_port
-    finally:
-        stop.set()
-        server.close()
-        transport.close()
+# The worker reports through staged pads instead of a console: the container
+# console has no reader at boot and a blocked write stalls init, so nothing may
+# print. Stage N writes 8N MiB (8N+4 on failure); the orchestrator reads the
+# volume's used space back from the storage API to know where the run stopped.
+FETCH_SCRIPT = r"""#!/bin/sh
+exec >/root/fetch.log 2>&1 </dev/null
+mkdir -p /root/out
+stage() { if [ "$2" = ok ]; then C=$((8*$1)); else C=$((8*$1+4)); fi
+	dd if=/dev/urandom of=/root/out/pad-$1 bs=1M count=$C 2>/dev/null; }
+ip link set dev eth0 up
+ip addr add @IP@ dev eth0 2>/dev/null
+ip route add default via @GW@ 2>/dev/null
+printf 'nameserver 223.5.5.5\nnameserver 119.29.29.29\n' > /etc/resolv.conf
+stage 1 ok
+udhcpc -i eth0 -n -q -t 4 >/dev/null 2>&1
+stage 2 ok
+timeout 150 apk add --no-cache curl ca-certificates >/dev/null 2>&1
+command -v curl >/dev/null 2>&1 && R=ok || R=fail
+stage 3 $R
+[ "$R" = ok ] || exit 1
+API=https://@GW@:8006/api2/json
+T=$(curl -sk --connect-timeout 10 -d 'username=@USER@&password=@PASS@' "$API/access/ticket")
+TK=$(printf '%s' "$T" | sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p')
+CS=$(printf '%s' "$T" | sed -n 's/.*"CSRFPreventionToken":"\([^"]*\)".*/\1/p')
+[ -n "$TK" ] && R=ok || R=fail
+stage 4 $R
+curl -sL --connect-timeout 15 --max-time 900 -H "Authorization: Bearer @TOKEN@" \
+	-H "Accept: application/octet-stream" -o /root/@ASSET@ \
+	"https://api.github.com/repos/@REPO@/releases/assets/@ASSET_ID@"
+SIZE=$(stat -c %s /root/@ASSET@ 2>/dev/null || echo 0)
+[ "$SIZE" = "@ASSET_SIZE@" ] && R=ok || R=fail
+stage 5 $R
+curl -sk --max-time 1800 -H "Cookie: PVEAuthCookie=$TK" -H "CSRFPreventionToken: $CS" \
+	-F content=import -F "filename=@/root/@ASSET@" -o /root/out/up.json \
+	"$API/nodes/@NODE@/storage/@STORAGE@/upload"
+grep -q UPID /root/out/up.json 2>/dev/null && R=ok || R=fail
+stage 6 $R
+"""
 
 
-def reset_storm(pve: PVE, vmid: str, rounds: int = 3) -> None:
-    """Reset the VM while the app download is in progress, every round.
-
-    A reset (the platform's reset button, not a power cut) used to leave the
-    root filesystem with an entry preen-mode fsck could not decide on, so the
-    next boot hung before networking came up. This reproduces that scenario:
-    wait until the download is visibly underway, reset, repeat, then run the
-    normal headless contract on the final boot.
-    """
-    mac = pve.call("GET", f"/nodes/{NODE}/qemu/{vmid}/config")["net0"].split("=")[1].split(",")[0]
-    key = paramiko.Ed25519Key.from_private_key_file(
-        str(HERE.parents[1] / "build" / "vendor" / "ssh_user_key")
-    )
-    for rnd in range(1, rounds + 1):
-        deadline = time.monotonic() + 120
-        info = ""
-        while time.monotonic() < deadline:
-            try:
-                ip = guest_ip_by_mac(mac, 30)
-                channel = pve_ssh_channel(ip, 22)
-                client = paramiko.SSHClient()
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                client.connect(ip, 22, username="root", pkey=key, sock=channel,
-                               timeout=10, allow_agent=False, look_for_keys=False)
-                _in, out, _err = client.exec_command(
-                    "stat -c %s /opt/business-app.tmp 2>/dev/null || echo 0"
-                )
-                size = int(out.read().strip() or 0)
-                _in, out, _err = client.exec_command("cut -d. -f1 /proc/uptime")
-                uptime = out.read().decode().strip()
-                client.close()
-                if size > 2 * 1024 * 1024:
-                    info = f"tmp={size}B uptime={uptime}s"
-                    break
-            except (SystemExit, ValueError, paramiko.SSHException, OSError):
-                time.sleep(3)
-        if not info:
-            sys.exit(f"reset storm: round {rnd} never reached an active download")
-        print(f"reset storm round {rnd}/{rounds}: {info} -> reset signal")
-        pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/reset")
+def build_fetch_template(dest: pathlib.Path, asset: dict) -> None:
+    """Patch the Alpine minirootfs into a one-shot fetch worker template."""
+    mini_url = "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.8-x86_64.tar.gz"
+    mini = OUT / "alpine-minirootfs.tar.gz"
+    if not mini.exists():
+        with requests.get(mini_url, timeout=120) as resp:
+            resp.raise_for_status()
+            mini.write_bytes(resp.content)
+    script = FETCH_SCRIPT
+    for key, value in {
+        "@IP@": FETCH_IP, "@GW@": FETCH_GW, "@USER@": env("PVE_USER"),
+        "@PASS@": env("PVE_API_PASS"), "@TOKEN@": env("GITHUB_TOKEN"),
+        "@ASSET@": asset["name"], "@ASSET_ID@": str(asset["id"]),
+        "@ASSET_SIZE@": str(asset["size"]), "@REPO@": env("GITHUB_REPOSITORY"),
+        "@NODE@": NODE, "@STORAGE@": STORAGE,
+    }.items():
+        script = script.replace(key, value)
+    with tarfile.open(mini, "r:gz") as tin, tarfile.open(dest, "w:gz") as tout:
+        for member in tin.getmembers():
+            payload = tin.extractfile(member) if member.isfile() else None
+            if member.name.endswith("etc/inittab") and payload:
+                body = FETCH_INITTAB.encode()
+                member.size = len(body)
+                tout.addfile(member, io.BytesIO(body))
+            else:
+                tout.addfile(member, payload)
+        info = tarfile.TarInfo("./root/fetch.sh")
+        body = script.encode()
+        info.size, info.mode, info.mtime = len(body), 0o755, int(time.time())
+        tout.addfile(info, io.BytesIO(body))
 
 
-def pve_ssh_channel(ip: str, port: int):
-    """Open a direct-tcpip channel through the PVE host SSH transport."""
-    transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
-    transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
-    return transport.open_channel("direct-tcpip", (ip, port), ("127.0.0.1", 0), timeout=8)
+def fetch_into_storage(pve: PVE, asset: dict) -> None:
+    """Run the worker CT until the qcow2 lands in import storage."""
+    template = f"fetch-worker-{asset['name']}.tar.gz"
+    template_path = OUT / template
+    if not import_volume_exists(pve, template):
+        build_fetch_template(template_path, asset)
+        pve.wait_task(pve.upload("vztmpl", template_path))
 
+    ostemplate = f"{STORAGE}:vztmpl/{template}"
+    vmid = pve.call("GET", "/cluster/nextid")
+    pve.wait_task(pve.call("POST", f"/nodes/{NODE}/lxc",
+                           vmid=vmid, pool=POOL, ostemplate=ostemplate,
+                           rootfs=f"{STORAGE}:8", memory=512, cores=2, swap=0,
+                           # hostname/password/onboot live under VM.Config.Options
+                           # and are refused by the tenant role.
+                           net0=f"name=eth0,bridge=vmbr0,ip={FETCH_IP},gw={FETCH_GW}"))
+    pve.wait_task(pve.call("POST", f"/nodes/{NODE}/lxc/{vmid}/status/start"))
+    print(f"fetch worker CT {vmid} started, waiting for {asset['name']}")
 
-def headless_check(pve: PVE, vmid: str, timeout: float = 180.0) -> None:
-    """Log in with the baked user key and assert the headless boot contract.
-
-    Screen capture alone cannot tell a broken SSH image from a working one, so
-    this asserts the three things that actually matter and have regressed
-    before:
-
-      * public-key login still works (a locked root shadow field silently
-        rejects every key login, and password auth is off, so there is no
-        fallback path into the machine);
-      * sshd and app-runner reached ``started`` in the default runlevel;
-      * app-runner logs each line once (the runner writing its own log file on
-        top of the service redirect used to duplicate every line).
-
-    The guest takes a DHCP lease, so the address is resolved from the MAC in
-    ``ip neigh`` on the node after a ping sweep; hostnames are not unique.
-    """
-    mac = pve.call("GET", f"/nodes/{NODE}/qemu/{vmid}/config")["net0"].split("=")[1].split(",")[0]
-    ip = guest_ip_by_mac(mac, timeout)
-    print(f"headless: guest {mac} -> {ip}")
-
-    key = HERE.parents[1] / "build" / "vendor" / "ssh_user_key"
-    if not key.exists():
-        sys.exit(f"missing user key {key}")
-
-    transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
-    transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
-    deadline = time.monotonic() + timeout
-    last: Exception | None = None
-    client: paramiko.SSHClient | None = None
+    deadline = time.monotonic() + 1500
     while time.monotonic() < deadline:
-        try:
-            channel = transport.open_channel(
-                "direct-tcpip", (ip, 22), ("127.0.0.1", 0), timeout=10
-            )
-            client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            client.connect(ip, 22, username="root",
-                           pkey=paramiko.Ed25519Key.from_private_key_file(str(key)),
-                           sock=channel, timeout=20, allow_agent=False, look_for_keys=False)
-            break
-        except Exception as exc:  # noqa: BLE001 - the last error is reported
-            last = exc
-            time.sleep(5)
-    if client is None:
-        sys.exit(f"headless: key login failed for {ip}: {last}")
-    print("headless: public-key login OK")
-
-    def run(cmd: str) -> str:
-        _in, out, _err = client.exec_command(cmd)
-        return out.read().decode(errors="replace")
-
-    status = run("rc-status default 2>/dev/null")
-    for service in ("sshd", "app-runner"):
-        if not any(service in line and "started" in line for line in status.splitlines()):
-            sys.exit(f"headless: {service} not started:\n{status}")
-
-    # Double-write means the same line landed twice, i.e. two identical lines
-    # with the same timestamp. Counting start lines alone breaks after a reset
-    # storm, where each boot legitimately appends one more line.
-    dups = run(
-        "grep 'app-runner starting' /var/log/app-runner.log "
-        "| sort | uniq -d | wc -l"
-    ).strip()
-    if dups != "0":
-        sys.exit(f"headless: app-runner logged {dups} duplicated start line(s)")
-
-    shadow = run("awk -F: '$1==\"root\"{print $2}' /etc/shadow").strip()
-    if not shadow or shadow[0] in "!*":
-        sys.exit("headless: root has an empty or locked password field")
-
-    print("headless: sshd + app-runner started, single log line, root password set")
-    client.close()
-    transport.close()
-
-
-def guest_ip_by_mac(mac: str, timeout: float = 180.0) -> str:
-    """Resolve a guest's DHCP address from the node's neighbour table.
-
-    The guest picks up a lease a few seconds into boot and the table only
-    learns about it once something talks to the address, so sweep the segment
-    between reads instead of assuming a fixed address.
-    """
-    transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
-    transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
-
-    def shell(cmd: str) -> str:
-        chan = transport.open_session()
-        chan.exec_command(cmd)
-        out = chan.makefile("r", 65536).read().decode(errors="replace")
-        chan.recv_exit_status()
-        chan.close()
-        return out
-
-    deadline = time.monotonic() + timeout
-    try:
-        while time.monotonic() < deadline:
-            for line in shell("ip neigh show dev vmbr0").splitlines():
-                parts = line.split()
-                if len(parts) < 3 or parts[0].count(".") != 3:
-                    continue
-                if parts[2].lower() == mac.lower():
-                    return parts[0]
-            shell("seq 2 254 | xargs -P 64 -I{} sh -c 'ping -c1 -W1 10.0.0.{} >/dev/null 2>&1'")
-            time.sleep(5)
-    finally:
-        transport.close()
-    sys.exit(f"headless: no neighbour entry for {mac}")
-
-
-def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path, attempts: int = 2) -> int:
-    """Capture a frame. The vncproxy ticket/port can be momentarily not ready
-    right after boot, so retry once with a fresh proxy ticket."""
-    last: subprocess.CompletedProcess | None = None
-    for _ in range(attempts):
-        proxy = pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/vncproxy")
-        try:
-            with ssh_vnc_tunnel(int(proxy["port"])) as local_port:
-                last = subprocess.run(
-                    ["vncdo", "-s", f"127.0.0.1::{local_port}", "-p", proxy["ticket"],
-                     "capture", str(out_png)],
-                    capture_output=True,
-                    timeout=90,
-                )
-            if last.returncode == 0:
-                return 0
-        except subprocess.TimeoutExpired:
-            last = None
-    return last.returncode if last is not None else 1
-
-
-def serial_check(vmid: str, timeout: float = 60.0) -> None:
-    """Log in over the platform-bridged serial socket and run a sanity command.
-
-    The platform maps the guest serial0 socket to ``~/serial-<vmid>.sock``
-    (mode 666); ``socat`` bridges it to ``/var/run/qemu-server/<vmid>.serial0``.
-    This only works on debug builds that still run a getty on ttyS0; production
-    images ship no serial surface, so the check is opt-in via ``--serial``.
-    """
-    transport = paramiko.Transport((env("PVE_HOST"), int(env("PVE_SSH_PORT"))))
-    transport.connect(username=ssh_username(), password=env("PVE_SSH_PASS"))
-    chan = transport.open_session()
-    chan.settimeout(5)
-    chan.exec_command(f"socat - UNIX-CONNECT:$HOME/serial-{vmid}.sock 2>&1")
-
-    buf = ""
-
-    def read_until(marker: str, deadline: float, optional: bool = False) -> str:
-        nonlocal buf
-        while marker not in buf and time.monotonic() < deadline:
-            try:
-                data = chan.recv(4096).decode(errors="replace")
-            except socket.timeout:
-                continue
-            if not data:
-                break
-            buf += data
-        if marker not in buf:
-            if optional:
-                return buf
-            raise RuntimeError(f"serial: waited for {marker!r}, tail={buf[-200:]!r}")
-        idx = buf.index(marker) + len(marker)
-        matched, buf = buf[:idx], buf[idx:]
-        return matched
-
-    deadline = time.monotonic() + timeout
-
-    # The getty may not print its prompt until it sees an initial line
-    # discipline character; send a CR to wake it before waiting for login:.
-    chan.sendall("\r")
-    read_until("login:", deadline)
-    chan.sendall("root\n")
-    # Empty-password builds skip the Password: prompt entirely. Give it only a
-    # short window; do not consume the main deadline waiting for a prompt that
-    # will never arrive, and only send the empty password if it actually shows.
-    if "Password:" in read_until("Password:", time.monotonic() + 3.0, optional=True):
-        chan.sendall("\n")
-    read_until("#", deadline)
-
-    chan.sendall("uname -a\n")
-    out = read_until("#", deadline)
-    lines = [line.strip() for line in out.splitlines() if "Linux" in line]
-    if not lines:
-        raise RuntimeError(f"serial: uname output missing Linux: {out[-200:]!r}")
-    print(f"serial console: login OK, uname -> {lines[0]}")
-
-    chan.close()
-    transport.close()
+        if import_volume_exists(pve, asset["name"]):
+            print("image present in import storage")
+            with contextlib.suppress(Exception):
+                pve.wait_task(pve.call("DELETE", f"/nodes/{NODE}/lxc/{vmid}"), timeout=120)
+            with contextlib.suppress(Exception):
+                pve.call("DELETE", f"/nodes/{NODE}/storage/{STORAGE}/content/"
+                         f"vztmpl/{template}")
+            template_path.unlink(missing_ok=True)
+            return
+        time.sleep(15)
+    sys.exit(f"fetch worker {vmid} did not deliver the image in time; inspect its rootfs pads")
 
 
 # --- VM lifecycle ----------------------------------------------------------
-def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str,
-              serial: bool = False) -> str:
+def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str) -> str:
     vmid = pve.call("GET", "/cluster/nextid")
     config = dict(
-        vmid=vmid,
-        pool=POOL,
-        name=f"ci-{vga}-{disk_bus}",
-        memory=memory,
-        cores=1,
-        ostype="l26",
-        net0="virtio,bridge=vmbr0",
-        machine="q35",
-        bios="seabios",
-        onboot=0,
-        agent=0,
-        tablet=0,
-        vga=vga,
-        # The app-runner binary is built GOAMD64=v3; the default kvm64 baseline
-        # lacks the v3 instruction set and refuses to run ("only be run on
-        # AMD64 processors with v3 microarchitecture support"). host passes the
-        # actual hypervisor CPU through.
+        vmid=vmid, pool=POOL, memory=memory, cores=1,
+        net0="virtio,bridge=vmbr0", machine="q35", vga=vga,
+        # app-runner is built GOAMD64=v3; the kvm64 baseline lacks the v3 set.
         cpu="host",
     )
-    if serial:
-        config["serial0"] = "socket"
     if disk_bus == "scsi":
-        config.update(
-            scsihw="virtio-scsi-single",
-            scsi0=f"{STORAGE}:0,import-from={import_source}",
-            boot="order=scsi0",
-        )
+        config.update(scsihw="virtio-scsi-single",
+                      scsi0=f"{STORAGE}:0,import-from={import_source}",
+                      boot="order=scsi0")
     else:
-        config.update(
-            virtio0=f"{STORAGE}:0,import-from={import_source}",
-            boot="order=virtio0",
-        )
+        config.update(virtio0=f"{STORAGE}:0,import-from={import_source}",
+                      boot="order=virtio0")
     pve.wait_task(pve.call("POST", f"/nodes/{NODE}/qemu", **config))
     return str(vmid)
 
 
 def teardown(pve: PVE, vmid: str) -> None:
-    """Stop and destroy the VM. Every step is best-effort: a stuck guest must
-    never keep the machine around until the pool runs dry."""
     with contextlib.suppress(Exception):
         pve.wait_task(pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/stop"), timeout=120)
     with contextlib.suppress(Exception):
         pve.wait_task(pve.call("DELETE", f"/nodes/{NODE}/qemu/{vmid}"), timeout=120)
 
 
+# --- screen capture --------------------------------------------------------
+@contextlib.contextmanager
+def vnc_bridge(pve: PVE, vmid: str, local_port: int = 5910):
+    """Expose the node-local VNC port through the gateway's WebSocket.
+
+    The vncticket authenticates the upgrade and doubles as the VNC password;
+    after that the tunnel is raw RFB bytes.
+    """
+    import websocket
+
+    for _var in ("http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(_var, None)
+        os.environ.pop(_var.upper(), None)
+    proxy = pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/vncproxy")
+    tunnel = (f"wss://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json/nodes/{NODE}"
+              f"/qemu/{vmid}/vncwebsocket?port={proxy['port']}"
+              f"&vncticket={requests.utils.quote(proxy['ticket'], safe='')}")
+    ws = websocket.create_connection(
+        tunnel, header={"Cookie": f"PVEAuthCookie={pve.cookie}"},
+        sslopt={"cert_reqs": ssl.CERT_NONE}, timeout=60, suppress_origin=True)
+
+    stop = threading.Event()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", local_port))
+    server.listen(1)
+    server.settimeout(1)
+
+    def drain_to_client(client):
+        with contextlib.suppress(Exception):
+            while not stop.is_set():
+                data = ws.recv()
+                if isinstance(data, bytes):
+                    client.sendall(data)
+                else:
+                    break
+        with contextlib.suppress(Exception):
+            client.close()
+
+    def client_to_ws(client):
+        with contextlib.suppress(Exception):
+            while not stop.is_set():
+                data = client.recv(4096)
+                if not data:
+                    break
+                ws.send(data)
+
+    def accept_loop():
+        while not stop.is_set():
+            try:
+                client, _ = server.accept()
+            except (socket.timeout, OSError):
+                return
+            threading.Thread(target=client_to_ws, args=(client,), daemon=True).start()
+            threading.Thread(target=drain_to_client, args=(client,), daemon=True).start()
+
+    threading.Thread(target=accept_loop, daemon=True).start()
+    try:
+        yield proxy["ticket"], local_port
+    finally:
+        stop.set()
+        server.close()
+        with contextlib.suppress(Exception):
+            ws.close()
+
+
+def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path, attempts: int = 2) -> int:
+    """Capture a frame. The proxy ticket can be momentarily not ready right
+    after boot, so retry once with a fresh one."""
+    last = 1
+    for _ in range(attempts):
+        with vnc_bridge(pve, vmid) as (ticket, port):
+            result = subprocess.run(
+                ["vncdo", "-s", f"127.0.0.1::{port}", "-p", ticket, "capture", str(out_png)],
+                capture_output=True, timeout=120)
+        last = result.returncode
+        if last == 0:
+            return 0
+    return last
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", default="dd", help="release tag to download from")
-    parser.add_argument("--asset", default="vpsvga", help="release asset name")
-    parser.add_argument("--raw", type=pathlib.Path, help="use an existing raw image instead of downloading")
+    parser.add_argument("--tag", default="dd", help="release tag holding the assets")
+    parser.add_argument("--asset", default="vpsvga", help="release asset base name")
+    parser.add_argument("--import-name", help="qcow2 already present in import storage")
     parser.add_argument("--vga", default="qxl",
-                        choices=["qxl", "std", "cirrus", "virtio", "vmware", "none"],
-                        help="display adapter")
+                        choices=["qxl", "std", "cirrus", "virtio", "vmware", "none"])
     parser.add_argument("--disk-bus", default="scsi", choices=["scsi", "virtio"])
-    parser.add_argument("--memory", default=512, type=int, help="guest memory in MB")
-    parser.add_argument("--boot-wait", type=float, default=20.0, help="seconds to wait before capturing")
-    parser.add_argument("--serial", action="store_true",
-                        help="drive the serial console (debug builds only; production images ship no ttyS0 getty)")
-    parser.add_argument("--ssh", action="store_true",
-                        help="assert the headless contract: key login, sshd + app-runner started, single log line")
-    parser.add_argument("--reset-storm", type=int, default=0, metavar="N",
-                        help="reset N times while the app download is in progress, then run the headless contract")
-    parser.add_argument("--keep", action="store_true", help="keep the VM running for manual inspection")
+    parser.add_argument("--memory", default=512, type=int)
+    parser.add_argument("--boot-wait", type=float, default=30.0)
+    parser.add_argument("--keep", action="store_true", help="leave the VM running")
+    parser.add_argument("--capture-only", action="store_true",
+                        help="reuse an existing VM instead of creating one")
     args = parser.parse_args()
 
     OUT.mkdir(parents=True, exist_ok=True)
@@ -527,36 +447,40 @@ def main() -> None:
     if fingerprint:
         verify_server_fingerprint(env("PVE_HOST"), int(env("PVE_API_PORT")), fingerprint)
 
-    pve = PVE(
-        base=f"https://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json",
-        user=env("PVE_USER"),
-        password=env("PVE_API_PASS"),
-    )
+    pve = PVE(base=f"https://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json",
+              user=env("PVE_USER"), password=env("PVE_API_PASS"))
+    discover(pve)
 
-    raw = args.raw or download_asset(args.tag, args.asset, OUT / f"{args.asset}.raw")
-    pve.wait_task(pve.upload("import", raw))
-    import_source = f"{STORAGE}:import/{raw.name}"
+    if args.capture_only:
+        vmid = env("PVE_VMID")
+        png = OUT / "screen.png"
+        if capture_screen(pve, vmid, png) != 0:
+            sys.exit("screen capture failed")
+        print(f"captured {png}")
+        return
 
-    vmid = create_vm(pve, args.disk_bus, args.vga, str(args.memory), import_source,
-                     serial=args.serial)
+    name = args.import_name or f"{args.asset}.qcow2"
+    if not import_volume_exists(pve, name):
+        asset = github_asset(args.tag, name)
+        fetch_into_storage(pve, asset)
+    import_source = f"{STORAGE}:import/{name}"
+
+    vmid = create_vm(pve, args.disk_bus, args.vga, str(args.memory), import_source)
     try:
         pve.wait_task(pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/start"))
         print(f"VM {vmid} booting ({args.vga}/{args.disk_bus}), waiting {args.boot_wait:.0f}s")
         time.sleep(args.boot_wait)
-
-        png = OUT / f"screen-{args.vga}-{args.disk_bus}.png"
+        png = OUT / f"screen-{args.asset}-{args.vga}-{args.disk_bus}.png"
         rc = capture_screen(pve, vmid, png)
-        print(f"capture rc={rc} png={png} exists={png.exists()}")
+        size = png.stat().st_size if png.exists() else 0
+        print(f"capture rc={rc} png={png} bytes={size}")
         if rc != 0:
-            sys.exit(f"screen capture failed (rc={rc})")
-
-        if args.serial:
-            serial_check(vmid)
-        if args.reset_storm:
-            reset_storm(pve, vmid, args.reset_storm)
-            headless_check(pve, vmid)
-        if args.ssh:
-            headless_check(pve, vmid)
+            sys.exit("screen capture failed")
+        # A uniform frame compresses to almost nothing; anything with content
+        # (kiosk UI or boot messages) is far above this floor.
+        if size < 4096:
+            sys.exit(f"frame looks blank ({size} bytes)")
+        print(f"PVE_VMID={vmid}")
     finally:
         if args.keep:
             print(f"keeping VM {vmid}")
@@ -566,7 +490,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    import urllib3
-
     urllib3.disable_warnings()
     main()
