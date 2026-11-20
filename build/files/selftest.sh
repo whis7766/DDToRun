@@ -10,6 +10,9 @@
 CONSOLE=/dev/ttyS0
 [ -w "$CONSOLE" ] || CONSOLE=/dev/console
 
+# Baked in at build time: the profile name is not in the runtime environment.
+PROFILE=$(cat /etc/selftest-profile 2>/dev/null || echo unknown)
+
 say() {
 	printf '%s\n' "$*" >>"$CONSOLE" 2>/dev/null || true
 }

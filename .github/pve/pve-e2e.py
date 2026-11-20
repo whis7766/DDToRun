@@ -587,22 +587,15 @@ def main() -> None:
                 except Exception as exc:  # noqa: BLE001 - reported as a failure
                     serial_box["error"] = repr(exc)
 
-            threading.Thread(target=_collect, daemon=True).start()
+            reader = threading.Thread(target=_collect, daemon=True)
+            reader.start()
         time.sleep(args.boot_wait)
-        png = OUT / f"screen-{args.asset}-{args.vga}-{args.disk_bus}.png"
-        rc = capture_screen(pve, vmid, png)
-        size = png.stat().st_size if png.exists() else 0
-        print(f"capture rc={rc} png={png} bytes={size}")
-        if rc != 0:
-            sys.exit("screen capture failed")
-        # A uniform frame compresses to almost nothing; anything with content
-        # (kiosk UI or boot messages) is far above this floor.
-        if size < 4096:
-            sys.exit(f"frame looks blank ({size} bytes)")
-        print(f"PVE_VMID={vmid}")
 
+        # Serial first: a debug image moves the kernel console to ttyS0, so its
+        # frame is legitimately black and the ttyS0 transcript is the assertion.
         if args.serial:
             print("reading serial console (termproxy)")
+            reader.join(timeout=args.serial_timeout)
             if "text" not in serial_box:
                 reader_error = serial_box.get("error", "reader still running")
                 sys.exit(f"serial console unavailable: {reader_error}")
@@ -618,6 +611,19 @@ def main() -> None:
             if problems:
                 sys.exit("serial assertions failed: " + "; ".join(problems))
             print("serial assertions passed")
+
+        png = OUT / f"screen-{args.asset}-{args.vga}-{args.disk_bus}.png"
+        rc = capture_screen(pve, vmid, png)
+        size = png.stat().st_size if png.exists() else 0
+        print(f"capture rc={rc} png={png} bytes={size}")
+        if rc != 0 and not args.serial:
+            sys.exit("screen capture failed")
+        # A uniform frame compresses to almost nothing; anything with content
+        # (kiosk UI or boot messages) is far above this floor. Debug images are
+        # exempt: their console lives on the serial line.
+        if size < 4096 and not args.serial:
+            sys.exit(f"frame looks blank ({size} bytes)")
+        print(f"PVE_VMID={vmid}")
     finally:
         if args.keep:
             print(f"keeping VM {vmid}")

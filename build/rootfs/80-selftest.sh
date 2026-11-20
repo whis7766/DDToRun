@@ -13,3 +13,7 @@ fi
 install -m 0755 /mnt/files/selftest.sh /usr/local/sbin/boot-selftest
 install -m 0755 /mnt/files/selftest.openrc /etc/init.d/selftest
 rc-update add selftest default >/dev/null
+
+# PROFILE only exists while the build runs; the reporter needs it at boot to
+# know which contract to check, so bake it into the image.
+printf '%s\n' "$PROFILE" >/etc/selftest-profile
