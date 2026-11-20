@@ -44,7 +44,7 @@ on:
         type: boolean
         default: false
       release_tag:
-        description: "Release tag holding the asset"
+        description: "Release tag holding the asset (a -dbg asset is looked up in <tag>-dbg automatically)"
         type: string
         default: dd
 
@@ -77,8 +77,13 @@ jobs:
 
       - name: Import image, boot and capture screen
         run: |
+          TAG="${{ inputs.release_tag }}"
+          # Debug twins live in <tag>-dbg, production images in <tag>.
+          case "${{ inputs.asset }}" in
+            *-dbg) case "$TAG" in *-dbg) ;; *) TAG="$TAG-dbg" ;; esac ;;
+          esac
           python .github/pve/pve-e2e.py \
-            --tag "${{ inputs.release_tag }}" \
+            --tag "$TAG" \
             --asset "${{ inputs.asset }}" \
             --vga "${{ inputs.vga }}" \
             --disk-bus "${{ inputs.disk_bus }}" \
