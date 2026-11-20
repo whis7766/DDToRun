@@ -3,6 +3,7 @@ name: Build Alpine VPS Image
 # Two flavors are built in parallel and published together to one release tag:
 #   vpsvga - VGA kiosk: fbterm + CJK font on tty1, no SSH
 #   vpsssh - headless: sshd on port 22 (key-only), app as a supervised service
+#   vpsssh-dbg - vpsssh plus serial console and boot selftest (testing only)
 #
 # This workflow only builds and publishes. Every real-machine test runs on the
 # PVE host (see pve-test.yml), never on a runner.
@@ -49,6 +50,12 @@ jobs:
         include:
           - { asset: vpsvga, headless: "false" }
           - { asset: vpsssh, headless: "true" }
+          # Debug twin of vpsssh: same headless image plus a serial console
+          # (console=ttyS0, ttyS0 getty, known root password) and a boot-time
+          # selftest that prints its contract on that line. A PVE tenant has no
+          # host shell and no guest agent, so this is the only way to assert
+          # what happens inside the guest.
+          - { asset: vpsssh-dbg, headless: "true", debug_serial: "true" }
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -87,6 +94,7 @@ jobs:
           ALPINE_BRANCH: "${{ inputs.alpine_branch }}"
           CGO_COMPAT: "${{ inputs.cgo_compat }}"
           HEADLESS_SSH: "${{ matrix.headless }}"
+          DEBUG_SERIAL: "${{ matrix.debug_serial }}"
         run: |
           # Do not use `sudo -E`: recent sudo builds ignore it and silently
           # drop every variable, which would build the wrong profile. Pass the
@@ -97,6 +105,7 @@ jobs:
             ALPINE_BRANCH="$ALPINE_BRANCH" \
             CGO_COMPAT="$CGO_COMPAT" \
             HEADLESS_SSH="$HEADLESS_SSH" \
+            DEBUG_SERIAL="${DEBUG_SERIAL:-false}" \
             bash build/build.sh
 
       - name: Compress to ${{ matrix.asset }}
@@ -171,6 +180,10 @@ jobs:
             dist/vpsssh.qcow2
             dist/vpsvga.qcow2.sha256
             dist/vpsssh.qcow2.sha256
+            dist/vpsssh-dbg
+            dist/vpsssh-dbg.sha256
+            dist/vpsssh-dbg.qcow2
+            dist/vpsssh-dbg.qcow2.sha256
 
       # Keep the last few runs: deleting every previous run also deletes the log
       # of the build that just published, which is the only forensic record when

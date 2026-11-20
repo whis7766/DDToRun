@@ -5,7 +5,9 @@ name: PVE Real-Machine Boot Test
 # The job pulls the importable qcow2 into the tenant's import storage (a throwaway
 # LXC worker downloads it on the node's own network - image bytes never travel
 # over the metered tenant tunnel), creates a VM with import-from, boots it, and
-# captures a frame through vncproxy + the API gateway's WebSocket. No SSH.
+# captures a frame through vncproxy + the API gateway's WebSocket. For the
+# debug flavor it also attaches to ttyS0 via termproxy and asserts the boot
+# selftest. No SSH anywhere.
 #
 # Credentials come from repository secrets only; this workflow never builds or
 # modifies an image - that is build.yml's job.
@@ -16,7 +18,7 @@ on:
       asset:
         description: "Release asset to boot"
         type: choice
-        options: [vpsvga, vpsssh]
+        options: [vpsvga, vpsssh, vpsssh-dbg]
         default: vpsvga
       vga:
         description: "Display adapter to simulate"
@@ -37,6 +39,10 @@ on:
         description: "Seconds to wait before capturing the screen"
         type: string
         default: "30"
+      serial:
+        description: "Assert the boot selftest over the serial console (debug images only)"
+        type: boolean
+        default: false
       release_tag:
         description: "Release tag holding the asset"
         type: string
@@ -75,9 +81,10 @@ jobs:
             --vga "${{ inputs.vga }}" \
             --disk-bus "${{ inputs.disk_bus }}" \
             --memory "${{ inputs.memory_mb }}" \
-            --boot-wait "${{ inputs.boot_wait }}"
+            --boot-wait "${{ inputs.boot_wait }}" \
+            ${{ inputs.serial && '--serial' || '' }}
 
-      - name: Upload screen capture
+      - name: Upload screen and serial log
         if: always()
         uses: actions/upload-artifact@v4
         with:

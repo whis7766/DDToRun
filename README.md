@@ -8,6 +8,7 @@
 | --- | --- |
 | `vpsvga` | VGA kiosk。tty1 用 fbterm + 文泉驿字体把业务全屏渲染成中文界面，不装 sshd。**没有纯文本回退**：拿不到 `/dev/fb0` 就报错退出并由 inittab 重新拉起。 |
 | `vpsssh` | 无头模式。sshd 监听 22（仅密钥登录），业务作为受管后台服务运行。 |
+| `vpsssh-dbg` | `vpsssh` 的调试孪生体，**只给测试用**：内核挂 `console=ttyS0`、开 ttyS0 getty、root 用固定口令，并在开机末尾把自检结果打到串口。生产环境不要用它。 |
 
 两者共用同一套内核、网络、时钟、根分区自动扩容逻辑，只在「怎么跑业务」上有差别。
 
@@ -63,7 +64,9 @@ HEADLESS_SSH=true  bash build/build.sh   # vpsssh
 
 release 里除 zstd 压缩的 raw 外还带一份 `<flavor>.qcow2`：PVE 的 `import-from` 只认 raw/qcow2/vmdk，qcow2 让节点直接拉取并分配磁盘，既不用在节点上解压，也不必让镜像字节走一遍租户隧道。
 
-可调环境变量：`APP_URL`、`IMAGE_SIZE_GB`、`ALPINE_BRANCH`、`ALPINE_MIRROR`、`KERNEL_FLAVOR`、`HEADLESS_SSH`、`PACKAGES`（追加）、`CGO_COMPAT`、`KEEP_WORK`。
+可调环境变量：`APP_URL`、`IMAGE_SIZE_GB`、`ALPINE_BRANCH`、`ALPINE_MIRROR`、`KERNEL_FLAVOR`、`HEADLESS_SSH`、`PACKAGES`（追加）、`CGO_COMPAT`、`DEBUG_SERIAL`（串口调试构建）、`KEEP_WORK`。
+
+`DEBUG_SERIAL=true` 会带上 alpine-make-vm-image 的 `--serial-console`（内核命令行加 `console=ttyS0`、放开 inittab 的 ttyS0 getty、写 securetty），安装 `boot-selftest` 服务，并把 root 口令从随机哈希换成固定值——串口能登录是这套调试构建的前提。
 
 ## 测试
 
@@ -77,7 +80,15 @@ release 里除 zstd 压缩的 raw 外还带一份 `<flavor>.qcow2`：PVE 的 `im
 
 镜像不走租户隧道，那是计费的 NAT 通路。脚本先确认 `import` 存储里有 `<asset>.qcow2`，没有就临时起一个 LXC 抓取容器：节点用自己的出口从 GitHub 拉这个 qcow2（release 里带一份，`import-from` 只认 raw/qcow2/vmdk，不必在节点上解压），再经节点本地 API 落进存储。容器不打印任何东西——开机时控制台没有读者，写阻塞会卡死 init——进度写成阶梯文件（第 N 步 8N MiB，失败 +4 MiB），靠存储卷的 `used` 反读，失败即销毁。镜像到位后用 `import-from` 建机，抓帧走 `vncproxy` + 网关 WebSocket（ticket 同时是 VNC 密码），桥到本地端口交给 vncdotool。
 
-租户角色里没有 `VM.Config.Options`，因此建机不带 `name` / `bios` / `onboot` / `agent`：这些选项会被直接拒绝，其余（`cores`、`memory`、`cpu=host`、`vga`、`machine`、`scsi0`、`net0`、`boot`）都可用。没有 `agent=1` 也意味着 rc-status / 日志去重 / 密钥登录这些机内断言无从谈起——**抓到的帧就是断言**：`vpsvga` 该出现 fbterm 中文界面，`vpsssh` 该停在无登录的启动信息。虚机 CPU 固定 `host`：app-runner 按 `GOAMD64=v3` 编译，默认 `kvm64` 基线缺 v3 指令集会拒绝运行。
+租户角色里没有 `VM.Config.Options`，因此建机不带 `name` / `bios` / `onboot` / `agent`：这些选项会被直接拒绝，其余（`cores`、`memory`、`cpu=host`、`vga`、`machine`、`scsi0`、`net0`、`boot`）都可用。没有 `agent=1` 也意味着 rc-status / 日志去重 / 密钥登录这些机内断言无从谈起。生产镜像里没有串口控制台，所以**抓到的帧就是断言**：`vpsvga` 该出现 fbterm 中文界面，`vpsssh` 该停在无登录的启动信息。
+
+要拿到真正的机内断言，用调试口味 `vpsssh-dbg` 加 `--serial`：脚本在开机后立刻连上 `termproxy`（经 `vncwebsocket` 拿到 guest 的 ttyS0，串口是 unix socket，没人在线时输出会被丢弃，所以必须先连），把整段启动日志存下来，再从里面取 `boot-selftest` 打的 `SELFTEST key=value` 行做断言：
+
+```sh
+.github/pve/pve-e2e.py --asset vpsssh-dbg --vga std --disk-bus scsi --serial
+```
+
+断言项是 `sshd=started`、`app-runner=started`、`app-runner-starts=1`（受管服务只能启动一次，重启风暴会让这条挂掉）、`rootpw=set`、根分区已扩容到 >1 GiB，最后一行 `SELFTEST-RESULT pass|fail`。串口日志落在 `.github/pve/out/serial-<asset>.log`。虚机 CPU 固定 `host`：app-runner 按 `GOAMD64=v3` 编译，默认 `kvm64` 基线缺 v3 指令集会拒绝运行。
 
 也可以手动触发 **PVE Real-Machine Boot Test**，选 `asset` / `vga` / `disk_bus` / `memory_mb` 组合，抓到的帧作为 artifact 上传。
 

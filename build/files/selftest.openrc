@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+# Runs the boot contract reporter once, after the services it inspects are up.
+# Debug images only.
+
+description="Report the boot contract on the serial console"
+
+depend() {
+	after app-runner sshd
+	need localmount
+}
+
+start() {
+	ebegin "Reporting boot selftest on the serial console"
+	/usr/local/sbin/boot-selftest
+	eend $?
+}

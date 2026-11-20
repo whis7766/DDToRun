@@ -13,13 +13,14 @@ die() {
 }
 
 HEADLESS_SSH=${HEADLESS_SSH:-false}
+DEBUG_SERIAL=${DEBUG_SERIAL:-false}
 
 if [ "$HEADLESS_SSH" = "true" ]; then
 	PROFILE=headless
 else
 	PROFILE=kiosk
 fi
-export HEADLESS_SSH PROFILE
+export HEADLESS_SSH PROFILE DEBUG_SERIAL
 
 for _stage in /mnt/rootfs/*.sh; do
 	[ -f "$_stage" ] || die "no rootfs stages found under /mnt/rootfs"
