@@ -424,7 +424,8 @@ def vnc_bridge(pve: PVE, vmid: str, local_port: int = 5910):
             ws.close()
 
 
-def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path, attempts: int = 2) -> int:
+def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path, attempts: int = 2,
+                   timeout: float = 60.0) -> int:
     """Capture a frame. The proxy ticket can be momentarily not ready right
     after boot, so retry once with a fresh one."""
     last = 1
@@ -432,7 +433,7 @@ def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path, attempts: int = 2
         with vnc_bridge(pve, vmid) as (ticket, port):
             result = subprocess.run(
                 ["vncdo", "-s", f"127.0.0.1::{port}", "-p", ticket, "capture", str(out_png)],
-                capture_output=True, timeout=120)
+                capture_output=True, timeout=timeout)
         last = result.returncode
         if last == 0:
             return 0
@@ -544,6 +545,7 @@ def main() -> None:
     parser.add_argument("--serial", action="store_true",
                         help="attach serial0 and assert the boot selftest over termproxy")
     parser.add_argument("--serial-timeout", type=float, default=300.0)
+    parser.add_argument("--capture-timeout", type=float, default=60.0)
     parser.add_argument("--capture-only", action="store_true",
                         help="reuse an existing VM instead of creating one")
     args = parser.parse_args()
@@ -613,7 +615,13 @@ def main() -> None:
             print("serial assertions passed")
 
         png = OUT / f"screen-{args.asset}-{args.vga}-{args.disk_bus}.png"
-        rc = capture_screen(pve, vmid, png)
+        try:
+            rc = capture_screen(pve, vmid, png, timeout=args.capture_timeout)
+        except subprocess.TimeoutExpired:
+            # A debug image keeps its console on ttyS0: the VGA display may never
+            # update, and vncdotool then waits for a refresh that never comes.
+            print("capture timed out (no display updates)")
+            rc = 1
         size = png.stat().st_size if png.exists() else 0
         print(f"capture rc={rc} png={png} bytes={size}")
         if rc != 0 and not args.serial:
