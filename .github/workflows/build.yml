@@ -144,7 +144,7 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish both assets to release
+    name: Publish production assets to release
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -164,6 +164,9 @@ jobs:
         run: |
           git tag -f "$TAG" HEAD
           git push origin "refs/tags/$TAG" --force
+          DBTAG="$TAG-dbg"
+          git tag -f "$DBTAG" HEAD
+          git push origin "refs/tags/$DBTAG" --force
 
       - name: Create/Update Release
         uses: softprops/action-gh-release@v2
@@ -180,6 +183,23 @@ jobs:
             dist/vpsssh.qcow2
             dist/vpsvga.qcow2.sha256
             dist/vpsssh.qcow2.sha256
+
+      # The debug twin carries a serial getty and a known root password, so it
+      # is kept out of the production release: it goes to <tag>-dbg instead, and
+      # the repository being public makes that difference matter.
+      - name: Create/Update debug release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}-dbg
+          name: ${{ inputs.release_tag }} (debug build - testing only)
+          body: |
+            Debug twin of the production image, for testing only.
+
+            It differs from the production image in exactly three ways: the kernel
+            console and a getty live on ttyS0, the root password is a known
+            placeholder, and a boot-time selftest reports the contract on the
+            serial line. Do not deploy it.
+          files: |
             dist/vpsssh-dbg
             dist/vpsssh-dbg.sha256
             dist/vpsssh-dbg.qcow2

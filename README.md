@@ -8,7 +8,7 @@
 | --- | --- |
 | `vpsvga` | VGA kiosk。tty1 用 fbterm + 文泉驿字体把业务全屏渲染成中文界面，不装 sshd。**没有纯文本回退**：拿不到 `/dev/fb0` 就报错退出并由 inittab 重新拉起。 |
 | `vpsssh` | 无头模式。sshd 监听 22（仅密钥登录），业务作为受管后台服务运行。 |
-| `vpsssh-dbg` | `vpsssh` 的调试孪生体，**只给测试用**：内核挂 `console=ttyS0`、开 ttyS0 getty、root 用固定口令，并在开机末尾把自检结果打到串口。生产环境不要用它。 |
+| `vpsssh-dbg` | `vpsssh` 的调试孪生体，**只给测试用**：内核挂 `console=ttyS0`、开 ttyS0 getty、root 用固定口令，并在开机末尾把自检结果打到串口。它发布在 `<tag>-dbg` 而不是生产 tag 上，生产环境不要用它。 |
 
 两者共用同一套内核、网络、时钟、根分区自动扩容逻辑，只在「怎么跑业务」上有差别。
 
@@ -62,6 +62,8 @@ HEADLESS_SSH=true  bash build/build.sh   # vpsssh
 
 产物在 `dist/`。CI 走 `.github/workflows/build.yml` 手动触发，两个口味并行构建后一起发布到同一个 release tag（默认 `dd`）。
 
+生产产物（`vpsvga` / `vpsssh`）发布到 `release_tag`，调试产物（`vpsssh-dbg`）单独发布到 `<release_tag>-dbg`：它带着串口 getty 和固定 root 口令，不该和生产镜像躺在一个 release 里。
+
 release 里除 zstd 压缩的 raw 外还带一份 `<flavor>.qcow2`：PVE 的 `import-from` 只认 raw/qcow2/vmdk，qcow2 让节点直接拉取并分配磁盘，既不用在节点上解压，也不必让镜像字节走一遍租户隧道。
 
 可调环境变量：`APP_URL`、`IMAGE_SIZE_GB`、`ALPINE_BRANCH`、`ALPINE_MIRROR`、`KERNEL_FLAVOR`、`HEADLESS_SSH`、`PACKAGES`（追加）、`CGO_COMPAT`、`DEBUG_SERIAL`（串口调试构建）、`KEEP_WORK`。
@@ -85,12 +87,29 @@ release 里除 zstd 压缩的 raw 外还带一份 `<flavor>.qcow2`：PVE 的 `im
 要拿到真正的机内断言，用调试口味 `vpsssh-dbg` 加 `--serial`：脚本在开机后立刻连上 `termproxy`（经 `vncwebsocket` 拿到 guest 的 ttyS0，串口是 unix socket，没人在线时输出会被丢弃，所以必须先连），把整段启动日志存下来，再从里面取 `boot-selftest` 打的 `SELFTEST key=value` 行做断言：
 
 ```sh
-.github/pve/pve-e2e.py --asset vpsssh-dbg --vga std --disk-bus scsi --serial
+.github/pve/pve-e2e.py --tag dd-dbg --asset vpsssh-dbg --vga std --disk-bus scsi --serial
 ```
 
 断言项是 `sshd=started`、`app-runner=started`、`app-runner-starts=1`（受管服务只能启动一次，重启风暴会让这条挂掉）、`rootpw=set`、根分区已扩容到 >1 GiB，最后一行 `SELFTEST-RESULT pass|fail`。串口日志落在 `.github/pve/out/serial-<asset>.log`。虚机 CPU 固定 `host`：app-runner 按 `GOAMD64=v3` 编译，默认 `kvm64` 基线缺 v3 指令集会拒绝运行。
 
 也可以手动触发 **PVE Real-Machine Boot Test**，选 `asset` / `vga` / `disk_bus` / `memory_mb` 组合，抓到的帧作为 artifact 上传。
+
+## 兼容性矩阵
+
+镜像只做一件事：把业务二进制拉下来执行。`app-runner` 用的是 `syscall.Exec`，所以「能不能跑」由内核判定，失败也只有一条 `exec failed: ...`。调试镜像的串口自检会在开机后等到这一步并上报结论（`app-exec=ok|no-loader|arch|failed|timeout`），e2e 用 `--expect-app` 断言。
+
+已验证的组合（真机、串口断言）：
+
+| 业务二进制 | 镜像 | 结论 |
+| --- | --- | --- |
+| 静态 Go（hysteria 18.7 MB） | 默认 | `ok`，真的跑起来 |
+| 静态 Go + `CGO_COMPAT=true` | 默认 | `ok`，glibc 兼容层不影响静态程序 |
+| `.tar.gz` 包（sing-box） | 默认 | `arch` —— `exec format error`，贴错链接的典型错 |
+| AArch64 二进制 | 默认 | `arch` |
+| glibc 动态 ELF（`compat-fixtures/glibc-hello`） | 默认 | `no-loader` —— 缺 `/lib64/ld-linux-x86-64.so.2` |
+| glibc 动态 ELF | `CGO_COMPAT=true` | 见 CI 记录 |
+
+`compat-fixtures` 那个 release 里放的就是这条轴用的小 ELF（16 KB，自己编的，不是业务代码），客户机可以匿名下载。
 
 ## 两个刻意的设计
 
