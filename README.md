@@ -61,6 +61,8 @@ HEADLESS_SSH=true  bash build/build.sh   # vpsssh
 
 产物在 `dist/`。CI 走 `.github/workflows/build.yml` 手动触发，两个口味并行构建后一起发布到同一个 release tag（默认 `dd`）。
 
+release 里除 zstd 压缩的 raw 外还带一份 `<flavor>.qcow2`：PVE 的 `import-from` 只认 raw/qcow2/vmdk，qcow2 让节点直接拉取并分配磁盘，既不用在节点上解压，也不必让镜像字节走一遍租户隧道。
+
 可调环境变量：`APP_URL`、`IMAGE_SIZE_GB`、`ALPINE_BRANCH`、`ALPINE_MIRROR`、`KERNEL_FLAVOR`、`HEADLESS_SSH`、`PACKAGES`（追加）、`CGO_COMPAT`、`KEEP_WORK`。
 
 ## 测试
