@@ -216,6 +216,19 @@ def github_asset(tag: str, name: str) -> dict:
     sys.exit(f"asset {name} not found in release {tag}")
 
 
+def asset_digest(asset: dict) -> str:
+    """The sha256 GitHub publishes for a release asset ("sha256:...").
+
+    It is the bytes as published, so the worker can prove the download is whole
+    before uploading it into storage. Missing for assets uploaded before the
+    field existed; then only the size is checked.
+    """
+    value = asset.get("digest") or ""
+    if value.startswith("sha256:"):
+        return value.split(":", 1)[1]
+    return ""
+
+
 FETCH_INITTAB = """::sysinit:/root/fetch.sh
 ::ctrlaltdel:/sbin/reboot
 """
@@ -246,11 +259,20 @@ TK=$(printf '%s' "$T" | sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p')
 CS=$(printf '%s' "$T" | sed -n 's/.*"CSRFPreventionToken":"\([^"]*\)".*/\1/p')
 [ -n "$TK" ] && R=ok || R=fail
 stage 4 $R
-curl -sL --connect-timeout 15 --max-time 900 -H "Authorization: Bearer @TOKEN@" \
-	-H "Accept: application/octet-stream" -o /root/@ASSET@ \
-	"https://api.github.com/repos/@REPO@/releases/assets/@ASSET_ID@"
+# Public download URL: the node fetches from the CDN rather than the API host,
+# which is rate-limited per token and adds a redirect through the API anyway.
+curl -sL --connect-timeout 15 --max-time 900 -o /root/@ASSET@ "@ASSET_URL@"
+# Verify bytes before they reach the storage: a truncated download produces a
+# qcow2 that PVE happily accepts and imports, and the guest then dies silently
+# after the bootloader. The digest GitHub publishes for the asset is the
+# reference, so no extra .sha256 file has to be fetched.
 SIZE=$(stat -c %s /root/@ASSET@ 2>/dev/null || echo 0)
-[ "$SIZE" = "@ASSET_SIZE@" ] && R=ok || R=fail
+GOT=$(sha256sum /root/@ASSET@ 2>/dev/null | cut -d" " -f1)
+# An asset published before GitHub started recording digests has no reference
+# hash; then the size is the only check available.
+if [ "$SIZE" != "@ASSET_SIZE@" ]; then R=fail
+elif [ -z "@ASSET_DIGEST@" ] || [ "$GOT" = "@ASSET_DIGEST@" ]; then R=ok
+else R=fail; fi
 stage 5 $R
 curl -sk --max-time 1800 -H "Cookie: PVEAuthCookie=$TK" -H "CSRFPreventionToken: $CS" \
 	-F content=import -F "filename=@/root/@ASSET@" -o /root/out/up.json \
@@ -274,6 +296,7 @@ def build_fetch_template(dest: pathlib.Path, asset: dict) -> None:
         "@PASS@": env("PVE_API_PASS"), "@TOKEN@": env("GITHUB_TOKEN"),
         "@ASSET@": asset["name"], "@ASSET_ID@": str(asset["id"]),
         "@ASSET_SIZE@": str(asset["size"]), "@REPO@": env("GITHUB_REPOSITORY"),
+        "@ASSET_DIGEST@": asset_digest(asset), "@ASSET_URL@": asset["browser_download_url"],
         "@NODE@": NODE, "@STORAGE@": STORAGE,
     }.items():
         script = script.replace(key, value)

@@ -158,15 +158,23 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Move release tag to current commit
+      # Move the tags through the REST API, not git push: pushing a ref whose
+      # commit range touches .github/workflows/* is refused for github.token
+      # ("without workflows permission"), even when the commit is already on
+      # main. Creating a ref at an existing commit via the API is not subject
+      # to that push rule.
+      - name: Move release tags to current commit
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag }}
         run: |
-          git tag -f "$TAG" HEAD
-          git push origin "refs/tags/$TAG" --force
-          DBTAG="$TAG-dbg"
-          git tag -f "$DBTAG" HEAD
-          git push origin "refs/tags/$DBTAG" --force
+          set -eu
+          for t in "$TAG" "$TAG-dbg"; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$t" >/dev/null 2>&1 || true
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$t" -f "sha=$GITHUB_SHA" >/dev/null
+            echo "tag $t -> $GITHUB_SHA"
+          done
 
       - name: Create/Update Release
         uses: softprops/action-gh-release@v2
