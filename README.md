@@ -107,9 +107,14 @@ release 里除 zstd 压缩的 raw 外还带一份 `<flavor>.qcow2`：PVE 的 `im
 | `.tar.gz` 包（sing-box） | 默认 | `arch` —— `exec format error`，贴错链接的典型错 |
 | AArch64 二进制 | 默认 | `arch` |
 | glibc 动态 ELF（`compat-fixtures/glibc-hello`） | 默认 | `no-loader` —— 缺 `/lib64/ld-linux-x86-64.so.2` |
-| glibc 动态 ELF | `CGO_COMPAT=true` | 见 CI 记录 |
+| glibc 动态 ELF | `CGO_COMPAT=true` | `ok` —— 程序自己打出 `alive pid=…`，gcompat 兼容层确实让它跑起来了 |
 
 `compat-fixtures` 那个 release 里放的就是这条轴用的小 ELF（16 KB，自己编的，不是业务代码），客户机可以匿名下载。
+
+两点说明：
+
+- `app-exec=ok` 是权威结论（内核真的把它加载起来了）；`app=alive|exited` 只是顺手用 `pidof` 探一下，进程名对不上时会误报 `exited`，不代表没跑。
+- 下载是「每次开机拉一次最新」：业务程序正常退出后受管服务重启会再拉一次（这是要的）；但 `exec` 失败后的内部重试循环复用已下的副本，不会每 2 秒重下整个文件。串口日志里的 `reusing the copy fetched in this boot` 就是这条护栏。
 
 ## 两个刻意的设计
 
