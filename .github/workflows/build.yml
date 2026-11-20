@@ -109,6 +109,20 @@ jobs:
           sha256sum "${{ matrix.asset }}" | tee "${{ matrix.asset }}.sha256"
           stat -c '%n %s bytes' "${{ matrix.asset }}"
 
+      # PVE's import-from channel takes raw/qcow2/vmdk, not zstd, and the tenant
+      # network must never carry image bytes: publishing a qcow2 lets the node
+      # pull it over its own network and allocate the VM disk from it directly.
+      # Compression only drops the free clusters, so the artifact stays close to
+      # the zstd size while remaining importable without a decompress step.
+      - name: Export importable qcow2
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q qemu-utils
+          cd "$GITHUB_WORKSPACE/dist"
+          qemu-img convert -c -O qcow2 vps-app-runner.img.raw "${{ matrix.asset }}.qcow2"
+          sha256sum "${{ matrix.asset }}.qcow2" | tee "${{ matrix.asset }}.qcow2.sha256"
+          stat -c '%n %s bytes' "${{ matrix.asset }}.qcow2"
+
       - name: Upload compressed artifact
         uses: actions/upload-artifact@v4
         with:
@@ -116,6 +130,8 @@ jobs:
           path: |
             dist/${{ matrix.asset }}
             dist/${{ matrix.asset }}.sha256
+            dist/${{ matrix.asset }}.qcow2
+            dist/${{ matrix.asset }}.qcow2.sha256
           retention-days: 1
 
   publish:
@@ -151,6 +167,10 @@ jobs:
             dist/vpsssh
             dist/vpsvga.sha256
             dist/vpsssh.sha256
+            dist/vpsvga.qcow2
+            dist/vpsssh.qcow2
+            dist/vpsvga.qcow2.sha256
+            dist/vpsssh.qcow2.sha256
 
       # Keep the last few runs: deleting every previous run also deletes the log
       # of the build that just published, which is the only forensic record when
