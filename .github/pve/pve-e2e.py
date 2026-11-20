@@ -259,21 +259,33 @@ TK=$(printf '%s' "$T" | sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p')
 CS=$(printf '%s' "$T" | sed -n 's/.*"CSRFPreventionToken":"\([^"]*\)".*/\1/p')
 [ -n "$TK" ] && R=ok || R=fail
 stage 4 $R
-# Public download URL: the node fetches from the CDN rather than the API host,
-# which is rate-limited per token and adds a redirect through the API anyway.
-curl -sL --connect-timeout 15 --max-time 900 -o /root/@ASSET@ "@ASSET_URL@"
-# Verify bytes before they reach the storage: a truncated download produces a
-# qcow2 that PVE happily accepts and imports, and the guest then dies silently
-# after the bootloader. The digest GitHub publishes for the asset is the
-# reference, so no extra .sha256 file has to be fetched.
-SIZE=$(stat -c %s /root/@ASSET@ 2>/dev/null || echo 0)
-GOT=$(sha256sum /root/@ASSET@ 2>/dev/null | cut -d" " -f1)
-# An asset published before GitHub started recording digests has no reference
-# hash; then the size is the only check available.
-if [ "$SIZE" != "@ASSET_SIZE@" ]; then R=fail
-elif [ -z "@ASSET_DIGEST@" ] || [ "$GOT" = "@ASSET_DIGEST@" ]; then R=ok
-else R=fail; fi
+# Download through the authenticated API asset endpoint: from this node the
+# bare CDN URL crawls (28 MB still incomplete after 12 minutes), while this
+# endpoint delivers in a couple of minutes. Verify the bytes against the
+# digest GitHub publishes before anything reaches storage - a same-size
+# corrupt qcow2 imports fine and then dies after the bootloader.
+R=fail
+i=1
+while [ "$i" -le 3 ]; do
+	curl -sL --connect-timeout 15 --max-time 600 \
+		-H "Authorization: Bearer @TOKEN@" -H "Accept: application/octet-stream" \
+		-o /root/@ASSET@ \
+		"https://api.github.com/repos/@REPO@/releases/assets/@ASSET_ID@"
+	SIZE=$(stat -c %s /root/@ASSET@ 2>/dev/null || echo 0)
+	GOT=$(sha256sum /root/@ASSET@ 2>/dev/null | cut -d" " -f1)
+	# Assets published before GitHub recorded digests have no reference hash;
+	# then the size is the only check available.
+	if [ "$SIZE" = "@ASSET_SIZE@" ] &&
+		{ [ -z "@ASSET_DIGEST@" ] || [ "$GOT" = "@ASSET_DIGEST@" ]; }; then
+		R=ok
+		break
+	fi
+	i=$((i+1))
+done
 stage 5 $R
+# Never upload a file that failed verification: it would boot to the
+# bootloader and die silently, far harder to diagnose than a stop here.
+[ "$R" = ok ] || exit 1
 curl -sk --max-time 1800 -H "Cookie: PVEAuthCookie=$TK" -H "CSRFPreventionToken: $CS" \
 	-F content=import -F "filename=@/root/@ASSET@" -o /root/out/up.json \
 	"$API/nodes/@NODE@/storage/@STORAGE@/upload"
@@ -296,7 +308,7 @@ def build_fetch_template(dest: pathlib.Path, asset: dict) -> None:
         "@PASS@": env("PVE_API_PASS"), "@TOKEN@": env("GITHUB_TOKEN"),
         "@ASSET@": asset["name"], "@ASSET_ID@": str(asset["id"]),
         "@ASSET_SIZE@": str(asset["size"]), "@REPO@": env("GITHUB_REPOSITORY"),
-        "@ASSET_DIGEST@": asset_digest(asset), "@ASSET_URL@": asset["browser_download_url"],
+        "@ASSET_DIGEST@": asset_digest(asset),
         "@NODE@": NODE, "@STORAGE@": STORAGE,
     }.items():
         script = script.replace(key, value)
