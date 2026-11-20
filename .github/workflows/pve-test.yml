@@ -1,12 +1,14 @@
 name: PVE Real-Machine Boot Test
 
-# End-to-end boot test against the multi-tenant Proxmox VE host.
+# End-to-end boot test against the multi-tenant Proxmox VE host, tenant API only.
 #
-# The guest imports a release image through the PVE 9 `import-from` channel,
-# boots with the chosen display adapter and disk bus, and the screen is captured
-# through an SSH direct-tcpip VNC tunnel. Credentials come from repository
-# secrets only; this workflow never builds or modifies an image - that is
-# build.yml's job.
+# The job pulls the importable qcow2 into the tenant's import storage (a throwaway
+# LXC worker downloads it on the node's own network - image bytes never travel
+# over the metered tenant tunnel), creates a VM with import-from, boots it, and
+# captures a frame through vncproxy + the API gateway's WebSocket. No SSH.
+#
+# Credentials come from repository secrets only; this workflow never builds or
+# modifies an image - that is build.yml's job.
 
 on:
   workflow_dispatch:
@@ -34,7 +36,7 @@ on:
       boot_wait:
         description: "Seconds to wait before capturing the screen"
         type: string
-        default: "20"
+        default: "30"
       release_tag:
         description: "Release tag holding the asset"
         type: string
@@ -47,21 +49,23 @@ jobs:
   boot:
     name: boot ${{ inputs.asset }} / ${{ inputs.vga }} / ${{ inputs.disk_bus }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       PVE_HOST: ${{ secrets.PVE_HOST }}
       PVE_API_PORT: ${{ secrets.PVE_API_PORT }}
-      PVE_SSH_PORT: ${{ secrets.PVE_SSH_PORT }}
       PVE_USER: ${{ secrets.PVE_USER }}
       PVE_API_PASS: ${{ secrets.PVE_API_PASS }}
-      PVE_SSH_PASS: ${{ secrets.PVE_SSH_PASS }}
       PVE_TLS_FP: ${{ secrets.PVE_TLS_FP }}
+      PVE_STORAGE: ${{ secrets.PVE_STORAGE }}
+      PVE_POOL: ${{ secrets.PVE_POOL }}
+      PVE_FETCH_IP: ${{ secrets.PVE_FETCH_IP }}
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Install client tooling
-        run: python -m pip install --quiet paramiko requests zstandard vncdotool
+        run: python -m pip install --quiet requests websocket-client vncdotool
 
       - name: Import image, boot and capture screen
         run: |
