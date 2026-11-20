@@ -61,10 +61,9 @@ jobs:
       PVE_API_PORT: ${{ secrets.PVE_API_PORT }}
       PVE_USER: ${{ secrets.PVE_USER }}
       PVE_API_PASS: ${{ secrets.PVE_API_PASS }}
-      # A certificate fingerprint is public data, not a credential: pinning it
-      # in the workflow is the point. The secret is still preferred when set,
-      # so a certificate rotation only needs the secret updated.
-      PVE_TLS_FP: ${{ secrets.PVE_TLS_FP || 'bb351c7a34b4b187d247c2e468b73554048fca0a6a0be0e95dd4998cfb144180' }}
+      # Pin the certificate of the test host: a fingerprint belongs in a secret,
+      # not in the repository.
+      PVE_TLS_FP: ${{ secrets.PVE_TLS_FP }}
       PVE_STORAGE: ${{ secrets.PVE_STORAGE }}
       PVE_POOL: ${{ secrets.PVE_POOL }}
       PVE_FETCH_IP: ${{ secrets.PVE_FETCH_IP }}
