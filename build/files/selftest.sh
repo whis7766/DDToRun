@@ -74,15 +74,24 @@ say "SELFTEST ipv4=${_ipv4:-none}"
 # a heartbeat so the serial reader never looks idle and hangs up.
 _appwait=${SELFTEST_APP_WAIT:-180}
 _elapsed=0
+_seen_running=0
 while [ "$_elapsed" -lt "$_appwait" ]; do
-	if grep -q 'running /opt/business-app' /var/log/app-runner.log 2>/dev/null ||
-		grep -q 'exec failed' /var/log/app-runner.log 2>/dev/null; then
+	# "exec failed" is the decisive line; "running" is logged *before* the exec
+	# attempt, so on its own it proves nothing. Once "running" shows up, keep
+	# polling a few more seconds so a following "exec failed" is not missed.
+	if grep -q 'exec failed' /var/log/app-runner.log 2>/dev/null; then
 		break
+	fi
+	if grep -q 'running /opt/business-app' /var/log/app-runner.log 2>/dev/null; then
+		_seen_running=$((_seen_running + 5))
+		[ "$_seen_running" -ge 10 ] && break
 	fi
 	sleep 5
 	_elapsed=$((_elapsed + 5))
 	say "SELFTEST wait=${_elapsed}s"
 done
+# Let the runner finish writing its verdict before reading it.
+sleep 3
 
 _appbytes=$(stat -c %s /opt/business-app 2>/dev/null || echo 0)
 say "SELFTEST app-bytes=${_appbytes:-0}"
@@ -112,6 +121,13 @@ else
 fi
 _dl=$(awk '/downloaded new version/{n++} END{print n+0}' /var/log/app-runner.log 2>/dev/null)
 say "SELFTEST app-downloads=${_dl:-0}"
+say "SELFTEST arch=$(uname -m 2>/dev/null)"
+
+# Ground truth for anything the summary above cannot explain: the runner's own
+# last lines, verbatim, on the serial transcript.
+tail -n 12 /var/log/app-runner.log 2>/dev/null | while IFS= read -r _line; do
+	say "SELFTEST log|$(printf '%s' "$_line" | tr -d '\r' | cut -c1-140)"
+done
 
 if [ "$fail" = "0" ]; then
 	say "SELFTEST-RESULT pass"
