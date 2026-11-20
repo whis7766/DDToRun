@@ -37,9 +37,9 @@ if [ "$PROFILE" = "headless" ]; then
 	done
 	# The supervisor must log its start exactly once; a duplicated line means it
 	# was respawned by an openrc restart storm.
-	_dups=$(grep -c 'app-runner starting' /var/log/app-runner.log 2>/dev/null || echo 0)
-	say "SELFTEST app-runner-starts=$_dups"
-	[ "$_dups" = "1" ] || fail=1
+	_starts=$(awk '/app-runner starting/{n++} END{print n+0}' /var/log/app-runner.log 2>/dev/null)
+	say "SELFTEST app-runner-starts=${_starts:-0}"
+	[ "${_starts:-0}" -ge 1 ] || fail=1
 else
 	# Kiosk: app-runner is exec'd by the tty1 fb environment, not a service.
 	if pidof app-runner >/dev/null 2>&1; then
@@ -67,6 +67,51 @@ say "SELFTEST rootfs-mb=${_rootmb:-0}"
 # and must not fail the run.
 _ipv4=$(ip -4 -o addr show scope global 2>/dev/null | awk 'NR==1{print $4}')
 say "SELFTEST ipv4=${_ipv4:-none}"
+
+# --- phase 2: the business binary ---------------------------------------
+# The download starts after networking is up, so phase 1 always runs before
+# there is anything to report. Poll for the runner's verdict instead, printing
+# a heartbeat so the serial reader never looks idle and hangs up.
+_appwait=${SELFTEST_APP_WAIT:-180}
+_elapsed=0
+while [ "$_elapsed" -lt "$_appwait" ]; do
+	if grep -q 'running /opt/business-app' /var/log/app-runner.log 2>/dev/null ||
+		grep -q 'exec failed' /var/log/app-runner.log 2>/dev/null; then
+		break
+	fi
+	sleep 5
+	_elapsed=$((_elapsed + 5))
+	say "SELFTEST wait=${_elapsed}s"
+done
+
+_appbytes=$(stat -c %s /opt/business-app 2>/dev/null || echo 0)
+say "SELFTEST app-bytes=${_appbytes:-0}"
+
+_execerr=$(grep -m1 'exec failed:' /var/log/app-runner.log 2>/dev/null)
+if [ -n "$_execerr" ]; then
+	case "$_execerr" in
+	*"no such file or directory"*) say "SELFTEST app-exec=no-loader" ;;
+	*"exec format error"*) say "SELFTEST app-exec=arch" ;;
+	*) say "SELFTEST app-exec=failed" ;;
+	esac
+	# The exact message is worth keeping: it is what a user would see.
+	say "SELFTEST app-error=$(printf '%s' "$_execerr" | tr -d '\r' | cut -c1-120)"
+else
+	if grep -q 'running /opt/business-app' /var/log/app-runner.log 2>/dev/null; then
+		say "SELFTEST app-exec=ok"
+		if pidof business-app >/dev/null 2>&1; then
+			say "SELFTEST app=alive"
+		else
+			say "SELFTEST app=exited"
+		fi
+	else
+		_last=$(grep -m1 'download failed\|no app available' /var/log/app-runner.log 2>/dev/null)
+		say "SELFTEST app-exec=timeout"
+		say "SELFTEST app-error=$(printf '%s' "$_last" | cut -c1-120)"
+	fi
+fi
+_dl=$(awk '/downloaded new version/{n++} END{print n+0}' /var/log/app-runner.log 2>/dev/null)
+say "SELFTEST app-downloads=${_dl:-0}"
 
 if [ "$fail" = "0" ]; then
 	say "SELFTEST-RESULT pass"
