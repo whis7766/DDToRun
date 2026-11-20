@@ -472,7 +472,7 @@ APP_VERDICTS = ("ok", "no-loader", "arch", "failed", "timeout")
 
 
 def read_serial(pve: PVE, vmid: str, marker: str = "SELFTEST-END",
-                timeout: float = 300.0, idle: float = 25.0) -> str:
+                timeout: float = 300.0, idle: float = 25.0, reconnects: int = 3) -> str:
     """Collect the guest's ttyS0 output through termproxy.
 
     termproxy hands out a ticket for the node-local websocket; the upgrade is
@@ -481,45 +481,61 @@ def read_serial(pve: PVE, vmid: str, marker: str = "SELFTEST-END",
     chardev drops output when nobody is attached, so the caller must connect
     right after starting the VM - the boot log and the selftest are then
     buffered here instead of lost.
+
+    The gateway closes these long-lived sockets without warning now and then
+    (the frp tunnel drops for a few seconds), so a closed socket is reconnected
+    and the transcript continues instead of failing the run.
     """
     import websocket
 
     for _var in ("http_proxy", "https_proxy", "all_proxy"):
         os.environ.pop(_var, None)
         os.environ.pop(_var.upper(), None)
-    term = pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/termproxy")
-    url = (f"wss://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json/nodes/{NODE}"
-           f"/qemu/{vmid}/vncwebsocket?port={term['port']}"
-           f"&vncticket={requests.utils.quote(term['ticket'], safe='')}")
-    ws = websocket.create_connection(
-        url, header={"Cookie": f"PVEAuthCookie={pve.cookie}"},
-        sslopt={"cert_reqs": ssl.CERT_NONE}, timeout=10, suppress_origin=True)
+
     buf = ""
-    try:
-        ws.send(f"{term['user']}:{term['ticket']}\n")
-        deadline = time.time() + timeout
-        last_data = time.time()
-        while time.time() < deadline:
-            try:
-                data = ws.recv()
-            except websocket.WebSocketTimeoutException:
-                data = ""
-            if data:
-                if isinstance(data, bytes):
-                    data = data.decode("utf-8", "replace")
-                buf += data
-                last_data = time.time()
-                if marker in buf:
+    deadline = time.time() + timeout
+    for attempt in range(reconnects):
+        if marker in buf or time.time() >= deadline:
+            break
+        term = pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/termproxy")
+        url = (f"wss://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json/nodes/{NODE}"
+               f"/qemu/{vmid}/vncwebsocket?port={term['port']}"
+               f"&vncticket={requests.utils.quote(term['ticket'], safe='')}")
+        ws = websocket.create_connection(
+            url, header={"Cookie": f"PVEAuthCookie={pve.cookie}"},
+            sslopt={"cert_reqs": ssl.CERT_NONE}, timeout=10, suppress_origin=True)
+        try:
+            ws.send(f"{term['user']}:{term['ticket']}\n")
+            last_data = time.time()
+            while time.time() < deadline:
+                try:
+                    data = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    data = ""
+                if data:
+                    if isinstance(data, bytes):
+                        data = data.decode("utf-8", "replace")
+                    buf += data
+                    last_data = time.time()
+                    if marker in buf:
+                        break
+                elif buf and time.time() - last_data > idle:
+                    # Quiet line: either the boot finished without the marker or
+                    # the guest is wedged. Stop waiting on this socket.
                     break
-            elif buf and time.time() - last_data > idle:
-                # Quiet line: either the boot finished without the marker or the
-                # guest is wedged. Report what we have instead of hanging.
-                break
-            elif marker in buf:
-                break
-    finally:
-        with contextlib.suppress(Exception):
-            ws.close()
+                elif marker in buf:
+                    break
+        except websocket.WebSocketConnectionClosedException:
+            # Gateway dropped the socket; a reconnect resumes the transcript.
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                ws.close()
+        if marker in buf:
+            break
+        if buf and time.time() > deadline:
+            break
+        time.sleep(2)
     return buf
 
 

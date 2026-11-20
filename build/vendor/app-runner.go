@@ -366,6 +366,14 @@ func downloadOnce(rawURL, dest string) error {
 	return nil
 }
 
+// fetched records that this boot already downloaded the app. The supervisor
+// respawns the runner whenever the business binary exits, and a binary that
+// exits immediately (no config, wrong arguments, a crash) would otherwise pull
+// the whole download again every respawn_delay - tens of megabytes every few
+// seconds. One fetch per boot is the contract; a new version arrives with the
+// next boot.
+var fetched bool
+
 // fetchApp downloads the binary with fixed retries and atomically replaces the
 // installed one. It reports whether a usable binary is in place when it returns
 // - a successful download, or an already-installed copy that was left alone.
@@ -373,6 +381,10 @@ func fetchApp() bool {
 	if appURL == "" {
 		log.Println("no download URL baked in - skip download")
 		return appPresent()
+	}
+	if fetched && appPresent() {
+		log.Printf("reusing the copy fetched in this boot (%s)", appPath)
+		return true
 	}
 	os.Remove(tmpPath)
 
@@ -395,6 +407,7 @@ func fetchApp() bool {
 		}
 
 		os.Chmod(appPath, 0o755)
+		fetched = true
 		if fi, statErr := os.Stat(appPath); statErr == nil {
 			log.Printf("downloaded new version (%d bytes)", fi.Size())
 			statusf("downloaded new version: %d bytes", fi.Size())
