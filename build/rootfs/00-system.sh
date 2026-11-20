@@ -14,6 +14,12 @@ install -d -m 0755 /opt /usr/local/sbin /var/log
 # random hash and discard the plaintext - password authentication stays off in
 # sshd_config, and key login keeps working.
 _pw=$(head -c 24 /dev/urandom | base64 2>/dev/null || echo "$$-$(date +%s%N)")
+if [ "$DEBUG_SERIAL" = "true" ]; then
+	# Debug build: the serial getty exists so a human (or the e2e) can get in
+	# without the guest agent, which means the root password has to be known.
+	# This branch is never taken for a production image.
+	_pw=${DEBUG_SERIAL_PASSWORD:-ddtorun-debug}
+fi
 _hash=$(mkpasswd -m sha512 "$_pw" 2>/dev/null || true)
 [ -n "$_hash" ] || die "mkpasswd could not hash the root password"
 awk -v h="$_hash" 'BEGIN{FS=OFS=":"} $1=="root"{$2=h} {print}' /etc/shadow >/etc/shadow.new &&

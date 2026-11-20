@@ -19,10 +19,17 @@ datastore permissions but no host shell, so every step goes through the API:
   outright. Everything else (cores, memory, cpu, vga, machine, scsi0, net0,
   boot) is allowed and used.
 
-Guest-side assertions (rc-status, log dedupe, key login) need either SSH or the
-guest agent, and setting ``agent=1`` is itself a ``VM.Config.Options`` change,
-so they are out of reach here. The captured frame is the assertion: the kiosk
-profile must show the fbterm UI, the headless profile must show boot messages.
+Guest-side assertions (rc-status, log dedupe, root password state) need either
+SSH or the guest agent, and setting ``agent=1`` is itself a
+``VM.Config.Options`` change, so they are out of reach here. Two channels
+remain, and both are used:
+
+* the captured frame: the kiosk profile must show the fbterm UI, the headless
+  profile must show boot messages;
+* with ``--serial`` (debug images only): ``termproxy`` over ``vncwebsocket``
+  gives the guest's ttyS0, where ``boot-selftest`` prints its contract as
+  ``SELFTEST key=value`` lines. Production images have no serial console, so
+  this mode is only meaningful for the ``vpsssh-dbg`` flavor.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ import hashlib
 import io
 import os
 import pathlib
+import re
 import socket
 import ssl
 import subprocess
@@ -319,7 +327,8 @@ def fetch_into_storage(pve: PVE, asset: dict) -> None:
 
 
 # --- VM lifecycle ----------------------------------------------------------
-def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str) -> str:
+def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str,
+              serial: bool = False) -> str:
     vmid = pve.call("GET", "/cluster/nextid")
     config = dict(
         vmid=vmid, pool=POOL, memory=memory, cores=1,
@@ -327,6 +336,10 @@ def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str
         # app-runner is built GOAMD64=v3; the kvm64 baseline lacks the v3 set.
         cpu="host",
     )
+    if serial:
+        # socket, not a TCP port: PVE owns the unix socket and termproxy relays
+        # it, which keeps the guest unreachable from the tenant network.
+        config.update(serial0="socket")
     if disk_bus == "scsi":
         config.update(scsihw="virtio-scsi-single",
                       scsi0=f"{STORAGE}:0,import-from={import_source}",
@@ -426,6 +439,97 @@ def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path, attempts: int = 2
     return last
 
 
+# --- serial console --------------------------------------------------------
+SELFTEST_EXPECT = {
+    "sshd": "started",
+    "app-runner": "started",
+    "app-runner-starts": "1",
+    "rootpw": "set",
+}
+
+
+def read_serial(pve: PVE, vmid: str, marker: str = "SELFTEST-END",
+                timeout: float = 300.0, idle: float = 25.0) -> str:
+    """Collect the guest's ttyS0 output through termproxy.
+
+    termproxy hands out a ticket for the node-local websocket; the upgrade is
+    authenticated with a ``user:ticket`` line, after which the stream is raw
+    console bytes (kernel messages and the login prompt share it). The guest
+    chardev drops output when nobody is attached, so the caller must connect
+    right after starting the VM - the boot log and the selftest are then
+    buffered here instead of lost.
+    """
+    import websocket
+
+    for _var in ("http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(_var, None)
+        os.environ.pop(_var.upper(), None)
+    term = pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/termproxy")
+    url = (f"wss://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json/nodes/{NODE}"
+           f"/qemu/{vmid}/vncwebsocket?port={term['port']}"
+           f"&vncticket={requests.utils.quote(term['ticket'], safe='')}")
+    ws = websocket.create_connection(
+        url, header={"Cookie": f"PVEAuthCookie={pve.cookie}"},
+        sslopt={"cert_reqs": ssl.CERT_NONE}, timeout=10, suppress_origin=True)
+    buf = ""
+    try:
+        ws.send(f"{term['user']}:{term['ticket']}\n")
+        deadline = time.time() + timeout
+        last_data = time.time()
+        while time.time() < deadline:
+            try:
+                data = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                data = ""
+            if data:
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8", "replace")
+                buf += data
+                last_data = time.time()
+                if marker in buf:
+                    break
+            elif buf and time.time() - last_data > idle:
+                # Quiet line: either the boot finished without the marker or the
+                # guest is wedged. Report what we have instead of hanging.
+                break
+            elif marker in buf:
+                break
+    finally:
+        with contextlib.suppress(Exception):
+            ws.close()
+    return buf
+
+
+def parse_selftest(text: str) -> tuple[dict, str | None]:
+    values: dict = {}
+    verdict = None
+    for line in text.splitlines():
+        line = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip()
+        match = re.match(r"SELFTEST-RESULT (pass|fail)", line)
+        if match:
+            verdict = match.group(1)
+            continue
+        match = re.match(r"SELFTEST ([a-z0-9-]+)=(.*)", line)
+        if match:
+            values[match.group(1)] = match.group(2).strip()
+    return values, verdict
+
+
+def assert_serial(text: str) -> list[str]:
+    values, verdict = parse_selftest(text)
+    problems = []
+    if not values:
+        return ["no SELFTEST output on the serial line"]
+    for key, want in SELFTEST_EXPECT.items():
+        if key not in values:
+            problems.append(f"missing {key}")
+        elif values[key] != want:
+            problems.append(f"{key}={values[key]} (want {want})")
+    if verdict != "pass":
+        problems.append(f"verdict={verdict}")
+    return problems
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", default="dd", help="release tag holding the assets")
@@ -437,6 +541,9 @@ def main() -> None:
     parser.add_argument("--memory", default=512, type=int)
     parser.add_argument("--boot-wait", type=float, default=30.0)
     parser.add_argument("--keep", action="store_true", help="leave the VM running")
+    parser.add_argument("--serial", action="store_true",
+                        help="attach serial0 and assert the boot selftest over termproxy")
+    parser.add_argument("--serial-timeout", type=float, default=300.0)
     parser.add_argument("--capture-only", action="store_true",
                         help="reuse an existing VM instead of creating one")
     args = parser.parse_args()
@@ -465,10 +572,22 @@ def main() -> None:
         fetch_into_storage(pve, asset)
     import_source = f"{STORAGE}:import/{name}"
 
-    vmid = create_vm(pve, args.disk_bus, args.vga, str(args.memory), import_source)
+    vmid = create_vm(pve, args.disk_bus, args.vga, str(args.memory), import_source,
+                     serial=args.serial)
     try:
         pve.wait_task(pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/status/start"))
         print(f"VM {vmid} booting ({args.vga}/{args.disk_bus}), waiting {args.boot_wait:.0f}s")
+        serial_box: dict = {}
+        if args.serial:
+            # Attach before the boot finishes: the guest chardev discards output
+            # while nobody is connected, and the selftest is a one-shot print.
+            def _collect():
+                try:
+                    serial_box["text"] = read_serial(pve, vmid, timeout=args.serial_timeout)
+                except Exception as exc:  # noqa: BLE001 - reported as a failure
+                    serial_box["error"] = repr(exc)
+
+            threading.Thread(target=_collect, daemon=True).start()
         time.sleep(args.boot_wait)
         png = OUT / f"screen-{args.asset}-{args.vga}-{args.disk_bus}.png"
         rc = capture_screen(pve, vmid, png)
@@ -481,6 +600,24 @@ def main() -> None:
         if size < 4096:
             sys.exit(f"frame looks blank ({size} bytes)")
         print(f"PVE_VMID={vmid}")
+
+        if args.serial:
+            print("reading serial console (termproxy)")
+            if "text" not in serial_box:
+                reader_error = serial_box.get("error", "reader still running")
+                sys.exit(f"serial console unavailable: {reader_error}")
+            text = serial_box["text"]
+            log = OUT / f"serial-{args.asset}.log"
+            log.write_text(text)
+            for line in text.splitlines():
+                clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).replace("\r", "")
+                if "SELFTEST" in clean:
+                    print(f"  {clean.strip()}")
+            problems = assert_serial(text)
+            print(f"serial log={log} bytes={len(text)}")
+            if problems:
+                sys.exit("serial assertions failed: " + "; ".join(problems))
+            print("serial assertions passed")
     finally:
         if args.keep:
             print(f"keeping VM {vmid}")

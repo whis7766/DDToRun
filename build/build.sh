@@ -54,11 +54,19 @@ v[0-9].*) ;;
 esac
 KERNEL_FLAVOR=${KERNEL_FLAVOR:-virt}
 HEADLESS_SSH=${HEADLESS_SSH:-false}
+# Debug builds only: a serial getty on ttyS0 plus a boot-time selftest that
+# reports the headless contract on that line. A tenant without a host shell
+# and without the guest agent has no other way to see inside the guest.
+DEBUG_SERIAL=${DEBUG_SERIAL:-false}
 EXTRA_PACKAGES=${PACKAGES:-}
 
 case "$HEADLESS_SSH" in
 true | false) ;;
 *) die "HEADLESS_SSH must be 'true' or 'false'" ;;
+esac
+case "$DEBUG_SERIAL" in
+true | false) ;;
+*) die "DEBUG_SERIAL must be 'true' or 'false'" ;;
 esac
 
 # No dhcpcd: IPv6 is disabled, so its only advantage over busybox udhcpc
@@ -93,7 +101,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-log "profile: HEADLESS_SSH=$HEADLESS_SSH branch=$ALPINE_BRANCH kernel=$KERNEL_FLAVOR"
+log "profile: HEADLESS_SSH=$HEADLESS_SSH branch=$ALPINE_BRANCH kernel=$KERNEL_FLAVOR serial=$DEBUG_SERIAL"
 
 # --- 1. external pieces --------------------------------------------------
 fetch_build_tool "$TOOL"
@@ -110,14 +118,25 @@ attach_loop "$IMG"
 write_partition_table "$IMG"
 log "partition ready on $PART_DEV"
 
+# Debug images only: --serial-console adds console=ttyS0 to the kernel command
+# line, uncomments the ttyS0 getty in /etc/inittab and appends it to securetty.
+if [ "$DEBUG_SERIAL" = "true" ]; then
+	SERIAL_ARGS="--serial-console"
+else
+	SERIAL_ARGS=""
+fi
+
 # --- 3. build the image in the partition ---------------------------------
 log "build root filesystem on $PART_DEV"
-HEADLESS_SSH="$HEADLESS_SSH" APP_URL="$APP_URL" \
+# shellcheck disable=SC2086 # $SERIAL_ARGS is a deliberately empty-or-one flag
+HEADLESS_SSH="$HEADLESS_SSH" APP_URL="$APP_URL" DEBUG_SERIAL="$DEBUG_SERIAL" \
 	"$TOOL" \
 	--branch "$ALPINE_BRANCH" \
 	--mirror-uri "$ALPINE_MIRROR" \
 	--kernel-flavor "$KERNEL_FLAVOR" \
 	--rootfs ext4 \
+	$SERIAL_ARGS \
+	--packages "$PACKAGES" \
 	--packages "$PACKAGES" \
 	--script-chroot \
 	"$PART_DEV" \
