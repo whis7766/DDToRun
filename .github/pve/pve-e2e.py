@@ -463,9 +463,12 @@ def capture_screen(pve: PVE, vmid: str, out_png: pathlib.Path, attempts: int = 2
 SELFTEST_EXPECT = {
     "sshd": "started",
     "app-runner": "started",
-    "app-runner-starts": "1",
     "rootpw": "set",
 }
+# Numeric keys are checked as a minimum: a business binary that exits on its
+# own makes supervisor restarts legitimate, so the count is "at least one".
+SELFTEST_MIN = {"app-runner-starts": 1}
+APP_VERDICTS = ("ok", "no-loader", "arch", "failed", "timeout")
 
 
 def read_serial(pve: PVE, vmid: str, marker: str = "SELFTEST-END",
@@ -535,7 +538,7 @@ def parse_selftest(text: str) -> tuple[dict, str | None]:
     return values, verdict
 
 
-def assert_serial(text: str) -> list[str]:
+def assert_serial(text: str, expect_app: str | None = None) -> list[str]:
     values, verdict = parse_selftest(text)
     problems = []
     if not values:
@@ -545,6 +548,22 @@ def assert_serial(text: str) -> list[str]:
             problems.append(f"missing {key}")
         elif values[key] != want:
             problems.append(f"{key}={values[key]} (want {want})")
+    for key, minimum in SELFTEST_MIN.items():
+        if key not in values:
+            problems.append(f"missing {key}")
+        else:
+            try:
+                if int(values[key]) < minimum:
+                    problems.append(f"{key}={values[key]} (want >= {minimum})")
+            except ValueError:
+                problems.append(f"{key}={values[key]} (not a number)")
+    if expect_app:
+        got = values.get("app-exec")
+        if got != expect_app:
+            problems.append(
+                f"app-exec={got} (want {expect_app}"
+                + (f", error: {values.get('app-error')}" if values.get("app-error") else "")
+                + ")")
     if verdict != "pass":
         problems.append(f"verdict={verdict}")
     return problems
@@ -565,6 +584,10 @@ def main() -> None:
                         help="attach serial0 and assert the boot selftest over termproxy")
     parser.add_argument("--serial-timeout", type=float, default=300.0)
     parser.add_argument("--capture-timeout", type=float, default=60.0)
+    parser.add_argument("--expect-app", choices=APP_VERDICTS,
+                        help="require this verdict for the business binary: "
+                             "ok=loaded, no-loader=missing dynamic loader, arch=wrong "
+                             "architecture/archive, failed=other exec error, timeout=never ran")
     parser.add_argument("--capture-only", action="store_true",
                         help="reuse an existing VM instead of creating one")
     args = parser.parse_args()
@@ -627,7 +650,7 @@ def main() -> None:
                 clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).replace("\r", "")
                 if "SELFTEST" in clean:
                     print(f"  {clean.strip()}")
-            problems = assert_serial(text)
+            problems = assert_serial(text, args.expect_app)
             print(f"serial log={log} bytes={len(text)}")
             if problems:
                 sys.exit("serial assertions failed: " + "; ".join(problems))
