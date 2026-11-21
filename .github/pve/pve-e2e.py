@@ -286,15 +286,18 @@ stage 5 $R
 # Never upload a file that failed verification: it would boot to the
 # bootloader and die silently, far harder to diagnose than a stop here.
 [ "$R" = ok ] || exit 1
+# Store under a tag-scoped name so a later release never reuses an older image
+# that happens to share the asset base name.
+mv /root/@ASSET@ /root/@IMPORT_NAME@
 curl -sk --max-time 1800 -H "Cookie: PVEAuthCookie=$TK" -H "CSRFPreventionToken: $CS" \
-	-F content=import -F "filename=@/root/@ASSET@" -o /root/out/up.json \
+	-F content=import -F "filename=@/root/@IMPORT_NAME@" -o /root/out/up.json \
 	"$API/nodes/@NODE@/storage/@STORAGE@/upload"
 grep -q UPID /root/out/up.json 2>/dev/null && R=ok || R=fail
 stage 6 $R
 """
 
 
-def build_fetch_template(dest: pathlib.Path, asset: dict) -> None:
+def build_fetch_template(dest: pathlib.Path, asset: dict, import_name: str) -> None:
     """Patch the Alpine minirootfs into a one-shot fetch worker template."""
     mini_url = "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.8-x86_64.tar.gz"
     mini = OUT / "alpine-minirootfs.tar.gz"
@@ -309,6 +312,7 @@ def build_fetch_template(dest: pathlib.Path, asset: dict) -> None:
         "@ASSET@": asset["name"], "@ASSET_ID@": str(asset["id"]),
         "@ASSET_SIZE@": str(asset["size"]), "@REPO@": env("GITHUB_REPOSITORY"),
         "@ASSET_DIGEST@": asset_digest(asset),
+        "@IMPORT_NAME@": import_name,
         "@NODE@": NODE, "@STORAGE@": STORAGE,
     }.items():
         script = script.replace(key, value)
@@ -350,12 +354,12 @@ def destroy(pve: PVE, kind: str, vmid) -> bool:
     return False
 
 
-def fetch_into_storage(pve: PVE, asset: dict) -> None:
+def fetch_into_storage(pve: PVE, asset: dict, import_name: str) -> None:
     """Run the worker CT until the qcow2 lands in import storage."""
-    template = f"fetch-worker-{asset['name']}.tar.gz"
+    template = f"fetch-worker-{import_name}.tar.gz"
     template_path = OUT / template
     if not import_volume_exists(pve, template):
-        build_fetch_template(template_path, asset)
+        build_fetch_template(template_path, asset, import_name)
         pve.wait_task(pve.upload("vztmpl", template_path))
 
     ostemplate = f"{STORAGE}:vztmpl/{template}"
@@ -367,11 +371,11 @@ def fetch_into_storage(pve: PVE, asset: dict) -> None:
                            # and are refused by the tenant role.
                            net0=f"name=eth0,bridge=vmbr0,ip={FETCH_IP},gw={FETCH_GW}"))
     pve.wait_task(pve.call("POST", f"/nodes/{NODE}/lxc/{vmid}/status/start"))
-    print(f"fetch worker CT {vmid} started, waiting for {asset['name']}")
+    print(f"fetch worker CT {vmid} started, waiting for {import_name}")
 
     deadline = time.monotonic() + 1500
     while time.monotonic() < deadline:
-        if import_volume_exists(pve, asset["name"]):
+        if import_volume_exists(pve, import_name):
             print("image present in import storage")
             destroy(pve, "lxc", vmid)
             with contextlib.suppress(Exception):
@@ -723,10 +727,12 @@ def main() -> None:
         print(f"captured {png}")
         return
 
-    name = args.import_name or f"{args.asset}.qcow2"
+    # Tag-scoped so two releases sharing an asset base name never reuse each
+    # other's imported image (a stale import silently boots the old build).
+    name = args.import_name or f"{args.tag}--{args.asset}.qcow2"
     if not import_volume_exists(pve, name):
-        asset = github_asset(args.tag, name)
-        fetch_into_storage(pve, asset)
+        asset = github_asset(args.tag, f"{args.asset}.qcow2")
+        fetch_into_storage(pve, asset, name)
     import_source = f"{STORAGE}:import/{name}"
 
     vmid = create_vm(pve, args.disk_bus, args.vga, str(args.memory), import_source,
