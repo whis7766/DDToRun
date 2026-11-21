@@ -51,6 +51,9 @@ import time
 
 import requests
 import urllib3
+from urllib3 import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.connection import HTTPSConnection
+from urllib3.poolmanager import PoolManager
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO_DIR = HERE.parents[1]
@@ -94,6 +97,77 @@ def verify_server_fingerprint(host: str, port: int, expected: str) -> None:
         sys.exit(f"TLS fingerprint mismatch: got {digest}, expected {expected}")
 
 
+def pinned_http(expected: str) -> requests.Session:
+    """A requests session that pins the server cert fingerprint on EVERY connection.
+
+    The one-shot pre-check above only guards the first handshake; the session
+    itself used to run verify=False, so a later connection (re-login on 401, a
+    retry after the tunnel drops) could land on a different cert and still carry
+    the ticket. This makes each TLS handshake compare the peer cert against the
+    pin and refuse to complete — so credentials are never written to a socket
+    whose certificate does not match.
+    """
+    fp = normalize_fingerprint(expected)
+
+    class _PinnedConn(HTTPSConnection):
+        def connect(self):
+            super().connect()
+            der = self.sock.getpeercert(binary_form=True)
+            if hashlib.sha256(der).hexdigest() != fp:
+                with contextlib.suppress(Exception):
+                    self.sock.close()
+                raise ssl.SSLError("TLS fingerprint mismatch; refusing to send credentials")
+
+    class _PinnedPool(HTTPSConnectionPool):
+        ConnectionCls = _PinnedConn
+
+    class _PinnedPM(PoolManager):
+        pool_classes_by_scheme = {"http": HTTPConnectionPool, "https": _PinnedPool}
+
+    class _Adapter(requests.adapters.HTTPAdapter):
+        def init_poolmanager(self, connections, maxsize, block=False, **kw):
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            kw["ssl_context"] = ctx
+            self.poolmanager = _PinnedPM(connections, maxsize, block=block, **kw)
+
+    session = requests.Session()
+    session.trust_env = False
+    session.verify = False
+    session.mount("https://", _Adapter())
+    return session
+
+
+def pinned_ws(url: str, header: dict, timeout: float):
+    """Open a console WebSocket whose TLS cert is pinned BEFORE the upgrade.
+
+    The cookie and vncticket ride in the upgrade request itself, so checking the
+    cert after create_connection would be too late. Wrap the socket ourselves,
+    verify the fingerprint, then hand the already-verified TLS socket to
+    websocket-client so no token is written to an unverified peer.
+    """
+    import websocket
+
+    fp = os.environ.get("PVE_TLS_FP")
+    if not fp:
+        return websocket.create_connection(
+            url, header=header, sslopt={"cert_reqs": ssl.CERT_NONE},
+            timeout=timeout, suppress_origin=True)
+    raw = socket.create_connection((env("PVE_HOST"), int(env("PVE_API_PORT"))), timeout=timeout)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    tls = ctx.wrap_socket(raw, server_hostname=env("PVE_HOST"))
+    der = tls.getpeercert(binary_form=True)
+    if hashlib.sha256(der).hexdigest() != normalize_fingerprint(fp):
+        with contextlib.suppress(Exception):
+            tls.close()
+        sys.exit("console TLS fingerprint mismatch: refusing to send ticket")
+    return websocket.create_connection(url, socket=tls, header=header,
+                                       timeout=timeout, suppress_origin=True)
+
+
 # --- PVE API ---------------------------------------------------------------
 class PVE:
     """Minimal PVE API client for one tenant session, with retry on the gateway.
@@ -102,14 +176,19 @@ class PVE:
     refused connection must not kill a six-minute boot test.
     """
 
-    def __init__(self, base: str, user: str, password: str):
+    def __init__(self, base: str, user: str, password: str, fingerprint: str | None = None):
         self.base = base
         self.user = user
         self.password = password
         # This dev box exports a CA bundle that would override verify=False.
-        self.http = requests.Session()
-        self.http.trust_env = False
-        self.http.verify = False
+        # With a fingerprint pin, every connection (including re-login) is
+        # checked against it; without one, fall back to the tunnel's verify=False.
+        if fingerprint:
+            self.http = pinned_http(fingerprint)
+        else:
+            self.http = requests.Session()
+            self.http.trust_env = False
+            self.http.verify = False
         self.cookie = ""
         self.csrf = ""
         self.login()
@@ -487,9 +566,7 @@ def vnc_bridge(pve: PVE, vmid: str, local_port: int = 5910):
     tunnel = (f"wss://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json/nodes/{NODE}"
               f"/qemu/{vmid}/vncwebsocket?port={proxy['port']}"
               f"&vncticket={requests.utils.quote(proxy['ticket'], safe='')}")
-    ws = websocket.create_connection(
-        tunnel, header={"Cookie": f"PVEAuthCookie={pve.cookie}"},
-        sslopt={"cert_reqs": ssl.CERT_NONE}, timeout=60, suppress_origin=True)
+    ws = pinned_ws(tunnel, {"Cookie": f"PVEAuthCookie={pve.cookie}"}, 60)
 
     stop = threading.Event()
     server = socket.socket()
@@ -594,9 +671,7 @@ def read_serial(pve: PVE, vmid: str, marker: str = "SELFTEST-END",
         url = (f"wss://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json/nodes/{NODE}"
                f"/qemu/{vmid}/vncwebsocket?port={term['port']}"
                f"&vncticket={requests.utils.quote(term['ticket'], safe='')}")
-        ws = websocket.create_connection(
-            url, header={"Cookie": f"PVEAuthCookie={pve.cookie}"},
-            sslopt={"cert_reqs": ssl.CERT_NONE}, timeout=10, suppress_origin=True)
+        ws = pinned_ws(url, {"Cookie": f"PVEAuthCookie={pve.cookie}"}, 10)
         try:
             ws.send(f"{term['user']}:{term['ticket']}\n")
             last_data = time.time()
@@ -712,7 +787,7 @@ def main() -> None:
         verify_server_fingerprint(env("PVE_HOST"), int(env("PVE_API_PORT")), fingerprint)
 
     pve = PVE(base=f"https://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json",
-              user=env("PVE_USER"), password=env("PVE_API_PASS"))
+              user=env("PVE_USER"), password=env("PVE_API_PASS"), fingerprint=fingerprint)
     discover(pve)
 
     if args.capture_only:
