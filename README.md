@@ -120,25 +120,29 @@ release 里除 zstd 压缩的 raw 外还带一份 `<flavor>.qcow2`：PVE 的 `im
 
 ## 网络性能与 SSH / VGA 真机验证
 
-调试自检除了启动契约，还在机内实测三件事，走 guest 自己的 NAT 出口、用国内镜像（阿里云），反映真实 VPS 体验而不是跨洋链路：
+调试自检除了启动契约，还在机内实测网络。分两条路径，因为这台 VPS 的外网出口很差，外网数字会严重低估虚拟网络本身的能力：
 
-- `net-gw-rtt-ms`：ping 默认网关 4 次的平均 RTT；
-- `net-dns-ms`：解析 `mirrors.aliyun.com` 的耗时；
-- `net-down-mbps` / `net-probe-bytes`：反复下载阿里云 Alpine minirootfs 累计满 2 秒，按字节/秒算吞吐（busybox `date` 没有可靠亚秒字段，所以用整秒累计而不是给单个小文件计时）。
+- **内网极限（权威）** `net-lan-mbps` / `net-lan-retr`：e2e 先在 vmbr0 上起一个 iperf3 服务端 CT（静态 `10.0.0.250`），guest 自检用 `iperf3 -c -t 5 -P 4` 打过去，量的是 virtio 网卡 + 虚拟交换机的真实上限。`--net-check` 断言这条 ≥500 Mbps。
+- **外网（仅参考）** `net-down-mbps` / `net-probe-bytes`：反复下载阿里云 Alpine minirootfs 累计满 2 秒算吞吐（busybox `date` 没有可靠亚秒字段，用整秒累计）；`net-gw-rtt-ms` ping 网关 4 次平均 RTT；`net-dns-ms` 解析耗时。外网受上游带宽限制，不做硬断言。
 
 SSH 不靠「端口开着」就算过：调试镜像内置一段回环自检——生成一次性 ed25519 密钥、写进 `authorized_keys`、用 `ssh root@127.0.0.1` 真正做一次密钥认证，上报 `ssh-login=ok|fail`，同时上报 `ssh-keyonly`（`sshd -T` 的 `passwordauthentication`）和 `ssh-listen22`。e2e `--ssh-check` 断言这三条。
 
-真机结论（PVE 租户 API，`netssh6` / `netssh6-dbg` release，业务夹具 `glibc-hello` + `CGO_COMPAT=true`）：
+真机结论（PVE 租户 API，`netssh8` / `netssh8-dbg` release，业务夹具 `glibc-hello` + `CGO_COMPAT=true`）：
 
 | 项 | 结果 |
 | --- | --- |
-| 下载吞吐 | ~10 MB/s（阿里云，NAT 出口） |
-| 网关 RTT | ~1.5 ms |
+| 内网吞吐极限（vmbr0，iperf3 4 流） | **~22.7 Gbps**，重传 0 |
+| 外网下载（阿里云，NAT 出口，仅参考） | ~5–10 MB/s（受上游限制） |
+| 网关 RTT | ~1.2–1.5 ms |
 | DNS | <1 ms |
 | SSH 密钥登录 | `ok`，且 `passwordauthentication=no`、监听 22 |
 | VGA（`vpsvga`，qxl） | 抓帧非空，fbterm + 文泉驿字体把业务程序输出渲染上屏 |
 
-VGA 口味没有串口，断言就是抓帧：帧里能看到业务程序的输出（`glibc-hello alive pid=…`）即证明 framebuffer 绑定、fbterm/CJK 字体、app-runner 下载并 exec 业务二进制这条链全通。
+内网 22.7 Gbps、零重传说明虚拟网卡/交换机不是瓶颈，瓶颈在外网上游。VGA 口味没有串口，断言就是抓帧：帧里能看到业务程序的输出（`glibc-hello alive pid=…`）即证明 framebuffer 绑定、fbterm/CJK 字体、app-runner 下载并 exec 业务二进制这条链全通。
+
+## 主机密钥
+
+仓库是公开的，所以 SSH **主机私钥绝不入库**：它放在 Actions secret `SSH_HOST_ED25519_KEY`，构建时还原进 `build/vendor/`，指纹跨重建稳定；公钥 `ssh_host_ed25519_key.pub` 入库无妨。旧私钥曾误入库，已轮换并用 `git filter-repo` 从全部历史清除、force-push。用户登录密钥（`ssh_user_key.pub` 对应的私钥）从未入库，不受影响。
 
 ## 两个刻意的设计
 
