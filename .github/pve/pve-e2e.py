@@ -618,8 +618,13 @@ def serial_exec(pve: PVE, vmid: str, commands: list[str],
 
     try:
         ws.send(f"{term['user']}:{term['ticket']}\n")
+        # Let termproxy finish attaching to the chardev before typing, or the
+        # first keystrokes are swallowed and the idle getty never re-prompts.
+        time.sleep(1.5)
         ws.send("\n")
-        pump("login:", 25)
+        time.sleep(0.7)
+        ws.send("\n")
+        pump("login:", 15)
         ws.send("root\n")
         pump("assword:", 15)
         ws.send(password + "\n")
