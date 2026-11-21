@@ -189,10 +189,15 @@ say "SELFTEST net-probe-bytes=${_total:-0}"
 _srv=$(cat /etc/netprobe-server 2>/dev/null)
 if command -v iperf3 >/dev/null 2>&1 && [ -n "$_srv" ]; then
 	_lanout=$(iperf3 -c "$_srv" -t 5 -P 4 -f m 2>/dev/null)
-	_lanmbps=$(printf '%s' "$_lanout" | awk '/\[SUM\].*receiver/{print $(NF-1)}' | tail -1)
-	_lanretr=$(printf '%s' "$_lanout" | awk '/\[SUM\].*sender/{print $(NF-2)}' | tail -1)
+	# The number sits immediately before the "Mbits/sec" unit; trailing
+	# sender/receiver (and retr) columns vary, so locate the unit, not a fixed offset.
+	_lanmbps=$(printf '%s' "$_lanout" | awk '/\[SUM\].*receiver/{for(i=1;i<=NF;i++) if($i=="Mbits/sec"){print $(i-1); exit}}')
+	_lanretr=$(printf '%s' "$_lanout" | awk '/\[SUM\].*sender/{for(i=1;i<=NF;i++) if($i=="Mbits/sec"){print $(i+1); exit}}')
 	say "SELFTEST net-lan-mbps=${_lanmbps:-unreachable}"
 	say "SELFTEST net-lan-retr=${_lanretr:-0}"
+	printf '%s\n' "$_lanout" | grep '\[SUM\]' | while IFS= read -r _l; do
+		say "SELFTEST lan|$(printf '%s' "$_l" | tr -s ' ' | cut -c1-140)"
+	done
 else
 	say "SELFTEST net-lan-mbps=skipped"
 fi
