@@ -777,22 +777,21 @@ def main() -> None:
 
             values, _ = parse_selftest(text)
             if args.net_check:
-                down = values.get("net-down-mbps", "")
-                rtt = values.get("net-gw-rtt-ms", "")
-                dns = values.get("net-dns-ms", "")
+                def num(key: str) -> float | None:
+                    # ping appends " ms" to its avg field; take the leading token.
+                    tok = str(values.get(key, "")).split()
+                    try:
+                        return float(tok[0]) if tok else None
+                    except ValueError:
+                        return None
+                down, rtt, dns = num("net-down-mbps"), num("net-gw-rtt-ms"), num("net-dns-ms")
                 print(f"network: down={down} MB/s gw-rtt={rtt} ms dns={dns} ms "
                       f"probe-bytes={values.get('net-probe-bytes', '?')}")
                 net_problems = []
-                try:
-                    if float(down) < 2.0:
-                        net_problems.append(f"download too slow ({down} MB/s)")
-                except ValueError:
-                    net_problems.append(f"no download measurement ({down})")
-                try:
-                    if float(rtt) > 100.0:
-                        net_problems.append(f"gateway latency too high ({rtt} ms)")
-                except ValueError:
-                    net_problems.append(f"no gateway RTT ({rtt})")
+                if down is None or down < 2.0:
+                    net_problems.append(f"download too slow ({values.get('net-down-mbps')})")
+                if rtt is None or rtt > 100.0:
+                    net_problems.append(f"gateway latency bad ({values.get('net-gw-rtt-ms')})")
                 if net_problems:
                     sys.exit("network performance check failed: " + "; ".join(net_problems))
                 print("network performance check passed")

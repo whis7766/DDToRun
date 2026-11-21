@@ -140,7 +140,7 @@ say "SELFTEST arch=$(uname -m 2>/dev/null)"
 # VPS usage rather than a cross-ocean link.
 _gw=$(ip route 2>/dev/null | awk '/default/{print $3; exit}')
 if [ -n "$_gw" ]; then
-	_rtt=$(ping -c 4 -W 2 "$_gw" 2>/dev/null | awk -F'/' '/round-trip|rtt/{print $5}')
+	_rtt=$(ping -c 4 -W 2 "$_gw" 2>/dev/null | awk -F'/' '/round-trip|rtt/{print $5}' | awk '{print $1}')
 	say "SELFTEST net-gw-rtt-ms=${_rtt:-fail}"
 else
 	say "SELFTEST net-gw-rtt-ms=no-route"
