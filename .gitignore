@@ -26,3 +26,5 @@ build/vendor/ssh_user_key
 # Python bytecode
 __pycache__/
 *.pyc
+# Host private SSH key - lives in the SSH_HOST_ED25519_KEY secret, never committed
+build/vendor/ssh_host_ed25519_key

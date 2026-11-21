@@ -87,6 +87,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zerofree zstd
 
+      - name: Restore SSH host key from secret
+        env:
+          SSH_HOST_KEY: ${{ secrets.SSH_HOST_ED25519_KEY }}
+        run: |
+          # The host private key is never committed (the repo is public). It
+          # lives in a secret and is materialized here so the baked host key
+          # keeps a stable fingerprint across rebuilds.
+          if [ -n "$SSH_HOST_KEY" ]; then
+            printf '%s\n' "$SSH_HOST_KEY" > build/vendor/ssh_host_ed25519_key
+            chmod 600 build/vendor/ssh_host_ed25519_key
+            echo "host key restored from secret"
+          else
+            echo "no host key secret; image will use a build-generated key"
+          fi
+
       - name: Build image (${{ matrix.asset }})
         env:
           APP_URL: "${{ inputs.app_url }}"
