@@ -182,6 +182,21 @@ else
 fi
 say "SELFTEST net-probe-bytes=${_total:-0}"
 
+# --- phase 3b: internal throughput ceiling (vmbr0) ----------------------
+# The external mirror is limited by the VPS's poor upstream, so it understates
+# the virtual network. Measure the real ceiling guest<->internal iperf3 server
+# over the same bridge: this is what the virtio NIC / virtual switch can do.
+_srv=$(cat /etc/netprobe-server 2>/dev/null)
+if command -v iperf3 >/dev/null 2>&1 && [ -n "$_srv" ]; then
+	_lanout=$(iperf3 -c "$_srv" -t 5 -P 4 -f m 2>/dev/null)
+	_lanmbps=$(printf '%s' "$_lanout" | awk '/\[SUM\].*receiver/{print $(NF-1)}' | tail -1)
+	_lanretr=$(printf '%s' "$_lanout" | awk '/\[SUM\].*sender/{print $(NF-2)}' | tail -1)
+	say "SELFTEST net-lan-mbps=${_lanmbps:-unreachable}"
+	say "SELFTEST net-lan-retr=${_lanretr:-0}"
+else
+	say "SELFTEST net-lan-mbps=skipped"
+fi
+
 # --- phase 4: SSH key-only login (headless debug) -----------------------
 # Prove the headless entry path actually works without needing an interactive
 # console: generate a throwaway key, authorize it, and log into sshd over

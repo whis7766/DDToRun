@@ -82,8 +82,9 @@ if [ "${CGO_COMPAT:-false}" = "true" ]; then
 	BASE_PACKAGES="$BASE_PACKAGES gcompat libc6-compat"
 fi
 if [ "$DEBUG_SERIAL" = "true" ]; then
-	# The debug SSH self-test logs into sshd over loopback, which needs a client.
-	BASE_PACKAGES="$BASE_PACKAGES openssh-client"
+	# The debug SSH self-test logs into sshd over loopback, which needs a client;
+	# iperf3 lets the selftest measure the internal (vmbr0) throughput ceiling.
+	BASE_PACKAGES="$BASE_PACKAGES openssh-client iperf3"
 fi
 PACKAGES="$BASE_PACKAGES $EXTRA_PACKAGES"
 

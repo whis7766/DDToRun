@@ -17,3 +17,7 @@ rc-update add selftest default >/dev/null
 # PROFILE only exists while the build runs; the reporter needs it at boot to
 # know which contract to check, so bake it into the image.
 printf '%s\n' "$PROFILE" >/etc/selftest-profile
+
+# Internal iperf3 server the e2e spins up on vmbr0 for the throughput-ceiling
+# test. Baked so the boot selftest knows where to aim without runtime config.
+printf '%s\n' "${NETPROBE_SERVER:-10.0.0.250}" >/etc/netprobe-server

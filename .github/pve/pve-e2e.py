@@ -387,6 +387,60 @@ def fetch_into_storage(pve: PVE, asset: dict, import_name: str) -> None:
     sys.exit(f"fetch worker {vmid} did not deliver the image in time; inspect its rootfs pads")
 
 
+# --- internal iperf3 server ------------------------------------------------
+NETSERVER_INITTAB = """::sysinit:/root/netserver.sh
+::ctrlaltdel:/sbin/reboot
+"""
+
+NETSERVER_SCRIPT = r"""#!/bin/sh
+exec >/root/net.log 2>&1 </dev/null
+ip link set dev eth0 up
+ip addr add @IP@ dev eth0 2>/dev/null
+ip route add default via @GW@ 2>/dev/null
+printf 'nameserver 223.5.5.5\nnameserver 119.29.29.29\n' > /etc/resolv.conf
+timeout 120 apk add --no-cache iperf3 >/dev/null 2>&1
+exec iperf3 -s -p 5201
+"""
+
+
+def start_netserver(pve: PVE) -> str:
+    """Boot a CT on vmbr0 that serves iperf3, for the internal ceiling test."""
+    template = "netserver.tar.gz"
+    template_path = OUT / template
+    if not import_volume_exists(pve, template):
+        mini = OUT / "alpine-minirootfs.tar.gz"
+        if not mini.exists():
+            url = ("https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/"
+                   "alpine-minirootfs-3.22.8-x86_64.tar.gz")
+            with requests.get(url, timeout=120) as resp:
+                resp.raise_for_status()
+                mini.write_bytes(resp.content)
+        script = NETSERVER_SCRIPT.replace("@IP@", FETCH_IP).replace("@GW@", FETCH_GW)
+        with tarfile.open(mini, "r:gz") as tin, tarfile.open(template_path, "w:gz") as tout:
+            for member in tin.getmembers():
+                payload = tin.extractfile(member) if member.isfile() else None
+                if member.name.endswith("etc/inittab") and payload:
+                    body = NETSERVER_INITTAB.encode()
+                    member.size = len(body)
+                    tout.addfile(member, io.BytesIO(body))
+                else:
+                    tout.addfile(member, payload)
+            info = tarfile.TarInfo("./root/netserver.sh")
+            body = script.encode()
+            info.size, info.mode, info.mtime = len(body), 0o755, int(time.time())
+            tout.addfile(info, io.BytesIO(body))
+        pve.wait_task(pve.upload("vztmpl", template_path))
+    vmid = pve.call("GET", "/cluster/nextid")
+    pve.wait_task(pve.call("POST", f"/nodes/{NODE}/lxc",
+                           vmid=vmid, pool=POOL, ostemplate=f"{STORAGE}:vztmpl/{template}",
+                           rootfs=f"{STORAGE}:1", memory=256, cores=2, swap=0,
+                           net0=f"name=eth0,bridge=vmbr0,ip={FETCH_IP},gw={FETCH_GW}"))
+    pve.wait_task(pve.call("POST", f"/nodes/{NODE}/lxc/{vmid}/status/start"))
+    print(f"iperf3 server CT {vmid} started on {FETCH_IP}")
+    time.sleep(12)  # let apk install iperf3 and bind the port
+    return vmid
+
+
 # --- VM lifecycle ----------------------------------------------------------
 def create_vm(pve: PVE, disk_bus: str, vga: str, memory: str, import_source: str,
               serial: bool = False) -> str:
@@ -677,6 +731,12 @@ def main() -> None:
         fetch_into_storage(pve, asset, name)
     import_source = f"{STORAGE}:import/{name}"
 
+    ns_vmid = None
+    if args.net_check:
+        # Internal ceiling test needs an iperf3 peer on the same bridge before
+        # the guest boots and runs its selftest.
+        ns_vmid = start_netserver(pve)
+
     vmid = create_vm(pve, args.disk_bus, args.vga, str(args.memory), import_source,
                      serial=args.serial)
     try:
@@ -726,17 +786,20 @@ def main() -> None:
                         return float(tok[0]) if tok else None
                     except ValueError:
                         return None
+                lan = num("net-lan-mbps")
                 down, rtt, dns = num("net-down-mbps"), num("net-gw-rtt-ms"), num("net-dns-ms")
-                print(f"network: down={down} MB/s gw-rtt={rtt} ms dns={dns} ms "
-                      f"probe-bytes={values.get('net-probe-bytes', '?')}")
+                print(f"network: LAN-ceiling={lan} Mbps (retr={values.get('net-lan-retr', '?')}) "
+                      f"external-down={down} MB/s gw-rtt={rtt} ms dns={dns} ms")
                 net_problems = []
-                if down is None or down < 2.0:
-                    net_problems.append(f"download too slow ({values.get('net-down-mbps')})")
+                # The internal virtio/bridge path is the real ceiling; the external
+                # mirror is limited by the VPS upstream and is informational only.
+                if lan is None or lan < 500.0:
+                    net_problems.append(f"internal throughput below 500 Mbps ({values.get('net-lan-mbps')})")
                 if rtt is None or rtt > 100.0:
                     net_problems.append(f"gateway latency bad ({values.get('net-gw-rtt-ms')})")
                 if net_problems:
                     sys.exit("network performance check failed: " + "; ".join(net_problems))
-                print("network performance check passed")
+                print("network performance check passed (internal ceiling)")
 
             if args.ssh_check:
                 # The debug image proves SSH itself: it authorizes a throwaway
@@ -776,6 +839,10 @@ def main() -> None:
             sys.exit(f"frame looks blank ({size} bytes)")
         print(f"PVE_VMID={vmid}")
     finally:
+        if ns_vmid is not None:
+            destroy(pve, "lxc", ns_vmid)
+            with contextlib.suppress(Exception):
+                pve.call("DELETE", f"/nodes/{NODE}/storage/{STORAGE}/content/vztmpl/netserver.tar.gz")
         if args.keep:
             print(f"keeping VM {vmid}")
         else:
