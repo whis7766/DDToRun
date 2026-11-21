@@ -57,11 +57,12 @@ case "$(awk -F: '$1=="root"{print $2}' /etc/shadow)" in
 *) say "SELFTEST rootpw=set" ;;
 esac
 
-# Root filesystem must have been grown past the packed image size. 1 GiB is the
-# floor: a 1G image that never ran grow-root reports ~900 MiB.
+# Root filesystem must have been grown past the packed image size. A 1 GiB
+# disk reports ~990 MiB usable in df (metadata + reserved blocks), so the floor
+# is 900: an ungrown packed rootfs is far smaller, a grown 1G image clears it.
 _rootmb=$(df -m / 2>/dev/null | awk 'NR==2{print $2}')
 say "SELFTEST rootfs-mb=${_rootmb:-0}"
-[ "${_rootmb:-0}" -gt 1024 ] || fail=1
+[ "${_rootmb:-0}" -gt 900 ] || fail=1
 
 # Informational: a bare vmbr0 has no DHCP server, so "none" here is expected
 # and must not fail the run.
@@ -154,23 +155,32 @@ case "$_dns0$_dns1" in
 esac
 
 _url="https://mirrors.aliyun.com/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.8-x86_64.tar.gz"
-_t0=$(date +%s%N 2>/dev/null)
-wget -q -O /tmp/netprobe.bin "$_url" 2>/dev/null
-_t1=$(date +%s%N 2>/dev/null)
-_sz=$(stat -c %s /tmp/netprobe.bin 2>/dev/null || echo 0)
+# busybox date has no reliable sub-second field, so accumulate whole seconds of
+# transfer instead of timing one small file: repeat the probe until >=2s have
+# passed (capped so a slow link cannot run away), then divide bytes by seconds.
+_t0=$(date +%s 2>/dev/null)
+_total=0
+_n=0
+_sz=0
+while [ "$_n" -lt 40 ]; do
+	wget -q -O /tmp/netprobe.bin "$_url" 2>/dev/null
+	_sz=$(stat -c %s /tmp/netprobe.bin 2>/dev/null || echo 0)
+	_total=$((_total + _sz))
+	_n=$((_n + 1))
+	_now=$(date +%s 2>/dev/null)
+	[ $((_now - _t0)) -ge 2 ] && break
+done
+_t1=$(date +%s 2>/dev/null)
 rm -f /tmp/netprobe.bin
-case "$_t0$_t1" in
-*[!0-9]* | "") say "SELFTEST net-down-mbps=unsupported" ;;
-*)
-	if [ "$_sz" -gt 0 ] && [ "$_t1" -gt "$_t0" ]; then
-		say "SELFTEST net-down-mbps=$(awk -v b="$_sz" -v a="$_t0" -v c="$_t1" \
-			'BEGIN{printf "%.1f", (b/1048576)/((c-a)/1000000000)}')"
-	else
-		say "SELFTEST net-down-mbps=fail"
-	fi
-	;;
-esac
-say "SELFTEST net-probe-bytes=${_sz:-0}"
+_dur=$((_t1 - _t0))
+[ "$_dur" -lt 1 ] && _dur=1
+if [ "$_total" -gt 0 ]; then
+	say "SELFTEST net-down-mbps=$(awk -v b="$_total" -v d="$_dur" \
+		'BEGIN{printf "%.1f", (b/1048576)/d}')"
+else
+	say "SELFTEST net-down-mbps=fail"
+fi
+say "SELFTEST net-probe-bytes=${_total:-0}"
 
 # Ground truth for anything the summary above cannot explain: the runner's own
 # last lines, verbatim, on the serial transcript.
