@@ -24,6 +24,10 @@ svc_state() {
 fail=0
 say "SELFTEST-BEGIN"
 say "SELFTEST profile=$PROFILE"
+say "SELFTEST dbg-getty-bin=$(command -v getty 2>/dev/null || echo none)"
+say "SELFTEST dbg-getty-procs=$(pidof getty 2>/dev/null | wc -w)"
+say "SELFTEST dbg-inittab-s0=$(grep '^ttyS0::respawn:' /etc/inittab 2>/dev/null | head -1)"
+say "SELFTEST dbg-init=$(readlink /proc/1/exe 2>/dev/null)"
 
 if [ "$PROFILE" = "headless" ]; then
 	for _svc in sshd app-runner; do
