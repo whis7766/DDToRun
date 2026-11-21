@@ -23,7 +23,9 @@ if [ "$DEBUG_SERIAL" = "true" ]; then
 	# reliable across alpine-make-vm-image versions, so install a known-good
 	# respawn line and allow root on ttyS0 explicitly.
 	sed -i '/^ttyS0::respawn:/d' /etc/inittab
-	echo 'ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100' >>/etc/inittab
+	# busybox getty takes BAUD first, then TTY (util-linux order is reversed);
+	# the wrong order makes getty exit instantly and respawn-loop with no login.
+	echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >>/etc/inittab
 	grep -qx ttyS0 /etc/securetty 2>/dev/null || echo ttyS0 >>/etc/securetty
 fi
 _hash=$(mkpasswd -m sha512 "$_pw" 2>/dev/null || true)
