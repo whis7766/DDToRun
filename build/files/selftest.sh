@@ -108,7 +108,15 @@ if [ -n "$_execerr" ]; then
 else
 	if grep -q 'running /opt/business-app' /var/log/app-runner.log 2>/dev/null; then
 		say "SELFTEST app-exec=ok"
-		if pidof business-app >/dev/null 2>&1; then
+		# pidof matches comm, which the gcompat loader can rename; scan argv[0]
+		# in /proc instead so a genuinely running business app is not misreported.
+		_alive=0
+		for _p in /proc/[0-9]*; do
+			case "$(tr '\0' ' ' <"$_p/cmdline" 2>/dev/null)" in
+			/opt/business-app*) _alive=1; break ;;
+			esac
+		done
+		if [ "$_alive" = 1 ]; then
 			say "SELFTEST app=alive"
 		else
 			say "SELFTEST app=exited"
@@ -122,6 +130,47 @@ fi
 _dl=$(awk '/downloaded new version/{n++} END{print n+0}' /var/log/app-runner.log 2>/dev/null)
 say "SELFTEST app-downloads=${_dl:-0}"
 say "SELFTEST arch=$(uname -m 2>/dev/null)"
+
+# --- phase 3: network performance --------------------------------------
+# The appliance lives or dies by its egress (it downloads the business binary
+# and then serves traffic). Measure the three things a user would feel:
+# gateway latency, resolver latency, and bulk download throughput. All over
+# the guest's own NAT path, using a China mirror so the number reflects real
+# VPS usage rather than a cross-ocean link.
+_gw=$(ip route 2>/dev/null | awk '/default/{print $3; exit}')
+if [ -n "$_gw" ]; then
+	_rtt=$(ping -c 4 -W 2 "$_gw" 2>/dev/null | awk -F'/' '/round-trip|rtt/{print $5}')
+	say "SELFTEST net-gw-rtt-ms=${_rtt:-fail}"
+else
+	say "SELFTEST net-gw-rtt-ms=no-route"
+fi
+
+_dns0=$(date +%s%N 2>/dev/null)
+nslookup mirrors.aliyun.com >/dev/null 2>&1
+_dns1=$(date +%s%N 2>/dev/null)
+case "$_dns0$_dns1" in
+*[!0-9]* | "") say "SELFTEST net-dns-ms=unsupported" ;;
+*) say "SELFTEST net-dns-ms=$(( (_dns1 - _dns0) / 1000000 ))" ;;
+esac
+
+_url="https://mirrors.aliyun.com/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.8-x86_64.tar.gz"
+_t0=$(date +%s%N 2>/dev/null)
+wget -q -O /tmp/netprobe.bin "$_url" 2>/dev/null
+_t1=$(date +%s%N 2>/dev/null)
+_sz=$(stat -c %s /tmp/netprobe.bin 2>/dev/null || echo 0)
+rm -f /tmp/netprobe.bin
+case "$_t0$_t1" in
+*[!0-9]* | "") say "SELFTEST net-down-mbps=unsupported" ;;
+*)
+	if [ "$_sz" -gt 0 ] && [ "$_t1" -gt "$_t0" ]; then
+		say "SELFTEST net-down-mbps=$(awk -v b="$_sz" -v a="$_t0" -v c="$_t1" \
+			'BEGIN{printf "%.1f", (b/1048576)/((c-a)/1000000000)}')"
+	else
+		say "SELFTEST net-down-mbps=fail"
+	fi
+	;;
+esac
+say "SELFTEST net-probe-bytes=${_sz:-0}"
 
 # Ground truth for anything the summary above cannot explain: the runner's own
 # last lines, verbatim, on the serial transcript.
