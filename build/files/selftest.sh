@@ -24,10 +24,6 @@ svc_state() {
 fail=0
 say "SELFTEST-BEGIN"
 say "SELFTEST profile=$PROFILE"
-say "SELFTEST dbg-getty-bin=$(command -v getty 2>/dev/null || echo none)"
-say "SELFTEST dbg-getty-procs=$(pidof getty 2>/dev/null | wc -w)"
-say "SELFTEST dbg-inittab-s0=$(grep '^ttyS0::respawn:' /etc/inittab 2>/dev/null | head -1)"
-say "SELFTEST dbg-init=$(readlink /proc/1/exe 2>/dev/null)"
 
 if [ "$PROFILE" = "headless" ]; then
 	for _svc in sshd app-runner; do
@@ -185,6 +181,36 @@ else
 	say "SELFTEST net-down-mbps=fail"
 fi
 say "SELFTEST net-probe-bytes=${_total:-0}"
+
+# --- phase 4: SSH key-only login (headless debug) -----------------------
+# Prove the headless entry path actually works without needing an interactive
+# console: generate a throwaway key, authorize it, and log into sshd over
+# loopback. A real key auth round-trip is the assertion, not just "port open".
+if [ "$PROFILE" = headless ] && command -v ssh >/dev/null 2>&1; then
+	_keyonly=$(sshd -T 2>/dev/null | awk '/^passwordauthentication /{print $2}')
+	say "SELFTEST ssh-keyonly=${_keyonly:-unknown}"
+	_listen=$( (netstat -ltn 2>/dev/null || ss -ltn 2>/dev/null) | grep -c ':22 ')
+	say "SELFTEST ssh-listen22=${_listen:-0}"
+	ssh-keygen -t ed25519 -f /tmp/stk -N '' -q 2>/dev/null
+	if [ -f /tmp/stk.pub ]; then
+		cat /tmp/stk.pub >>/root/.ssh/authorized_keys
+		_sshout=$(ssh -i /tmp/stk -o StrictHostKeyChecking=no \
+			-o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=10 \
+			root@127.0.0.1 'echo SSH_LOGIN_OK' 2>&1)
+		case "$_sshout" in
+		*SSH_LOGIN_OK*) say "SELFTEST ssh-login=ok" ;;
+		*)
+			say "SELFTEST ssh-login=fail"
+			say "SELFTEST ssh-error=$(printf '%s' "$_sshout" | tr -d '\r' | cut -c1-120)"
+			;;
+		esac
+		rm -f /tmp/stk /tmp/stk.pub
+	else
+		say "SELFTEST ssh-login=no-keygen"
+	fi
+else
+	say "SELFTEST ssh-login=skipped"
+fi
 
 # Ground truth for anything the summary above cannot explain: the runner's own
 # last lines, verbatim, on the serial transcript.
