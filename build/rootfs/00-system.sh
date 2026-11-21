@@ -19,6 +19,12 @@ if [ "$DEBUG_SERIAL" = "true" ]; then
 	# without the guest agent, which means the root password has to be known.
 	# This branch is never taken for a production image.
 	_pw=${DEBUG_SERIAL_PASSWORD:-ddtorun-debug}
+	# Guarantee a working ttyS0 login: --serial-console's inittab edit is not
+	# reliable across alpine-make-vm-image versions, so install a known-good
+	# respawn line and allow root on ttyS0 explicitly.
+	sed -i '/^ttyS0::respawn:/d' /etc/inittab
+	echo 'ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100' >>/etc/inittab
+	grep -qx ttyS0 /etc/securetty 2>/dev/null || echo ttyS0 >>/etc/securetty
 fi
 _hash=$(mkpasswd -m sha512 "$_pw" 2>/dev/null || true)
 [ -n "$_hash" ] || die "mkpasswd could not hash the root password"
