@@ -574,6 +574,64 @@ def read_serial(pve: PVE, vmid: str, marker: str = "SELFTEST-END",
     return buf
 
 
+def serial_exec(pve: PVE, vmid: str, commands: list[str],
+                password: str = "ddtorun-debug", timeout: float = 180.0) -> str:
+    """Log in on the debug getty and run commands, returning the transcript.
+
+    The debug image is the only one with a usable console login, so it doubles
+    as the probe head for checks that need a shell inside the guest (SSH key
+    login, sshd config). Output is bracketed with markers so the caller can
+    tell command output apart from the login banner.
+    """
+    import websocket
+
+    for _var in ("http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(_var, None)
+        os.environ.pop(_var.upper(), None)
+
+    term = pve.call("POST", f"/nodes/{NODE}/qemu/{vmid}/termproxy")
+    url = (f"wss://{env('PVE_HOST')}:{env('PVE_API_PORT')}/api2/json/nodes/{NODE}"
+           f"/qemu/{vmid}/vncwebsocket?port={term['port']}"
+           f"&vncticket={requests.utils.quote(term['ticket'], safe='')}")
+    ws = websocket.create_connection(
+        url, header={"Cookie": f"PVEAuthCookie={pve.cookie}"},
+        sslopt={"cert_reqs": ssl.CERT_NONE}, timeout=10, suppress_origin=True)
+    buf = ""
+
+    def pump(until: str, limit: float) -> bool:
+        nonlocal buf
+        end = time.time() + limit
+        while time.time() < end:
+            try:
+                data = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                data = ""
+            if data:
+                buf += data.decode("utf-8", "replace") if isinstance(data, bytes) else data
+                if until in buf:
+                    return True
+        return until in buf
+
+    try:
+        ws.send(f"{term['user']}:{term['ticket']}\n")
+        ws.send("\n")
+        pump("login:", 25)
+        ws.send("root\n")
+        pump("assword:", 15)
+        ws.send(password + "\n")
+        pump("# ", 25)
+        ws.send("echo SX_BEGIN\n")
+        pump("SX_BEGIN", 15)
+        for cmd in commands:
+            ws.send(cmd + "\n")
+        ws.send("echo SX_END\n")
+        pump("SX_END", timeout)
+    finally:
+        with contextlib.suppress(Exception):
+            ws.close()
+    return buf
+
+
 def parse_selftest(text: str) -> tuple[dict, str | None]:
     values: dict = {}
     verdict = None
@@ -634,6 +692,10 @@ def main() -> None:
     parser.add_argument("--serial", action="store_true",
                         help="attach serial0 and assert the boot selftest over termproxy")
     parser.add_argument("--serial-timeout", type=float, default=300.0)
+    parser.add_argument("--net-check", action="store_true",
+                        help="assert the selftest network-performance numbers (dbg only)")
+    parser.add_argument("--ssh-check", action="store_true",
+                        help="log in over serial and prove key-only SSH login works (dbg only)")
     parser.add_argument("--capture-timeout", type=float, default=60.0)
     parser.add_argument("--expect-app", choices=APP_VERDICTS,
                         help="require this verdict for the business binary: "
@@ -706,6 +768,57 @@ def main() -> None:
             if problems:
                 sys.exit("serial assertions failed: " + "; ".join(problems))
             print("serial assertions passed")
+
+            values, _ = parse_selftest(text)
+            if args.net_check:
+                down = values.get("net-down-mbps", "")
+                rtt = values.get("net-gw-rtt-ms", "")
+                dns = values.get("net-dns-ms", "")
+                print(f"network: down={down} MB/s gw-rtt={rtt} ms dns={dns} ms "
+                      f"probe-bytes={values.get('net-probe-bytes', '?')}")
+                net_problems = []
+                try:
+                    if float(down) < 2.0:
+                        net_problems.append(f"download too slow ({down} MB/s)")
+                except ValueError:
+                    net_problems.append(f"no download measurement ({down})")
+                try:
+                    if float(rtt) > 100.0:
+                        net_problems.append(f"gateway latency too high ({rtt} ms)")
+                except ValueError:
+                    net_problems.append(f"no gateway RTT ({rtt})")
+                if net_problems:
+                    sys.exit("network performance check failed: " + "; ".join(net_problems))
+                print("network performance check passed")
+
+            if args.ssh_check:
+                print("probing SSH over the serial login")
+                ssh_cmds = [
+                    "sshd -T 2>/dev/null | grep -Ei '^(passwordauthentication|permitrootlogin|pubkeyauthentication|port) '",
+                    "(netstat -ltn 2>/dev/null || ss -ltn 2>/dev/null) | grep ':22 '",
+                    "command -v ssh >/dev/null 2>&1 || apk add --no-cache openssh-client >/dev/null 2>&1",
+                    "ssh-keygen -t ed25519 -f /tmp/tk -N '' -q",
+                    "cat /tmp/tk.pub >> /root/.ssh/authorized_keys",
+                    "ssh -i /tmp/tk -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                    "-o BatchMode=yes root@127.0.0.1 'echo SSH_LOGIN_OK'",
+                ]
+                out = serial_exec(pve, vmid, ssh_cmds)
+                (OUT / f"ssh-{args.asset}.log").write_text(out)
+                ssh_problems = []
+                if "SSH_LOGIN_OK" not in out:
+                    ssh_problems.append("key login did not succeed")
+                if "passwordauthentication no" not in out.lower():
+                    ssh_problems.append("sshd is not key-only")
+                if ":22 " not in out:
+                    ssh_problems.append("sshd not listening on 22")
+                for line in out.splitlines():
+                    if any(k in line for k in ("SSH_LOGIN_OK", "passwordauthentication",
+                                               "permitrootlogin", "pubkeyauthentication",
+                                               ":22 ", "port ")):
+                        print(f"  {line.strip()}")
+                if ssh_problems:
+                    sys.exit("SSH check failed: " + "; ".join(ssh_problems))
+                print("SSH key-only login check passed")
 
         png = OUT / f"screen-{args.asset}-{args.vga}-{args.disk_bus}.png"
         try:
