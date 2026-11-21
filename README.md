@@ -90,7 +90,9 @@ release 里除 zstd 压缩的 raw 外还带一份 `<flavor>.qcow2`：PVE 的 `im
 .github/pve/pve-e2e.py --tag dd-dbg --asset vpsssh-dbg --vga std --disk-bus scsi --serial
 ```
 
-断言项是 `sshd=started`、`app-runner=started`、`app-runner-starts=1`（受管服务只能启动一次，重启风暴会让这条挂掉）、`rootpw=set`、根分区已扩容到 >1 GiB，最后一行 `SELFTEST-RESULT pass|fail`。串口日志落在 `.github/pve/out/serial-<asset>.log`。虚机 CPU 固定 `host`：app-runner 按 `GOAMD64=v3` 编译，默认 `kvm64` 基线缺 v3 指令集会拒绝运行。
+断言项是 `sshd=started`、`app-runner=started`、`app-runner-starts=1`（受管服务只能启动一次，重启风暴会让这条挂掉）、`rootpw=set`、根分区已扩容（1G 盘 `df` 约 990 MiB，门槛设 900），最后一行 `SELFTEST-RESULT pass|fail`。串口日志落在 `.github/pve/out/serial-<asset>.log`。虚机 CPU 固定 `host`：app-runner 按 `GOAMD64=v3` 编译，默认 `kvm64` 基线缺 v3 指令集会拒绝运行。
+
+加 `--net-check` 会断言自检里的网络实测（见下），加 `--ssh-check` 会断言镜像内做的 SSH 密钥登录回环测试。
 
 也可以手动触发 **PVE Real-Machine Boot Test**，选 `asset` / `vga` / `disk_bus` / `memory_mb` 组合，抓到的帧作为 artifact 上传。
 
@@ -113,8 +115,30 @@ release 里除 zstd 压缩的 raw 外还带一份 `<flavor>.qcow2`：PVE 的 `im
 
 两点说明：
 
-- `app-exec=ok` 是权威结论（内核真的把它加载起来了）；`app=alive|exited` 只是顺手用 `pidof` 探一下，进程名对不上时会误报 `exited`，不代表没跑。
+- `app-exec=ok` 是权威结论（内核真的把它加载起来了）；`app=alive|exited` 现在扫 `/proc/*/cmdline` 的 `argv[0]`（不再用 `pidof` 猜进程名，gcompat 加载器改名也不会误报）。短命夹具跑完就退，`exited` 属实，不影响 `ok`。
 - 下载是「每次开机拉一次最新」：业务程序正常退出后受管服务重启会再拉一次（这是要的）；但 `exec` 失败后的内部重试循环复用已下的副本，不会每 2 秒重下整个文件。串口日志里的 `reusing the copy fetched in this boot` 就是这条护栏。
+
+## 网络性能与 SSH / VGA 真机验证
+
+调试自检除了启动契约，还在机内实测三件事，走 guest 自己的 NAT 出口、用国内镜像（阿里云），反映真实 VPS 体验而不是跨洋链路：
+
+- `net-gw-rtt-ms`：ping 默认网关 4 次的平均 RTT；
+- `net-dns-ms`：解析 `mirrors.aliyun.com` 的耗时；
+- `net-down-mbps` / `net-probe-bytes`：反复下载阿里云 Alpine minirootfs 累计满 2 秒，按字节/秒算吞吐（busybox `date` 没有可靠亚秒字段，所以用整秒累计而不是给单个小文件计时）。
+
+SSH 不靠「端口开着」就算过：调试镜像内置一段回环自检——生成一次性 ed25519 密钥、写进 `authorized_keys`、用 `ssh root@127.0.0.1` 真正做一次密钥认证，上报 `ssh-login=ok|fail`，同时上报 `ssh-keyonly`（`sshd -T` 的 `passwordauthentication`）和 `ssh-listen22`。e2e `--ssh-check` 断言这三条。
+
+真机结论（PVE 租户 API，`netssh6` / `netssh6-dbg` release，业务夹具 `glibc-hello` + `CGO_COMPAT=true`）：
+
+| 项 | 结果 |
+| --- | --- |
+| 下载吞吐 | ~10 MB/s（阿里云，NAT 出口） |
+| 网关 RTT | ~1.5 ms |
+| DNS | <1 ms |
+| SSH 密钥登录 | `ok`，且 `passwordauthentication=no`、监听 22 |
+| VGA（`vpsvga`，qxl） | 抓帧非空，fbterm + 文泉驿字体把业务程序输出渲染上屏 |
+
+VGA 口味没有串口，断言就是抓帧：帧里能看到业务程序的输出（`glibc-hello alive pid=…`）即证明 framebuffer 绑定、fbterm/CJK 字体、app-runner 下载并 exec 业务二进制这条链全通。
 
 ## 两个刻意的设计
 
